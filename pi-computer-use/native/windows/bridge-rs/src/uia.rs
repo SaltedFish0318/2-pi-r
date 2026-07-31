@@ -764,11 +764,37 @@ mod native {
         if !target_id.is_empty() && target_id == hit_id {
             return Ok(true);
         }
+        // 窗口级兜底：Chromium 系应用（Chrome/Edge/Electron）的 UIA 元素级命中
+        // 测试常因 provider 内部 runtime_id 不稳定而失败，但窗口级遮挡检测
+        // （WindowFromPoint + GetAncestor）忠实反映“该点实际被谁占据”。
+        if window_level_occlusion_ok(hwnd, x, y) {
+            return Ok(true);
+        }
         let walker = unsafe {
             uia.ControlViewWalker()
                 .map_err(|e| format!("ControlViewWalker: {e}"))?
         };
         Ok(is_ancestor(&walker, &target_id, hit) || is_ancestor(&walker, &hit_id, target))
+    }
+
+    /// 物理窗口级遮挡检测：命中点处的顶层窗口是否与目标窗口同根。
+    fn window_level_occlusion_ok(target_hwnd: isize, x: f64, y: f64) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+        let pt = POINT {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        };
+        let hit: HWND = unsafe { WindowFromPoint(pt) };
+        if hit.is_invalid() {
+            return false;
+        }
+        let target: HWND = HWND(target_hwnd as *mut _);
+        if hit == target {
+            return true;
+        }
+        let hit_root = unsafe { GetAncestor(hit, GA_ROOT) };
+        let target_root = unsafe { GetAncestor(target, GA_ROOT) };
+        hit_root == target_root
     }
 
     fn is_ancestor(
