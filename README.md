@@ -18,6 +18,18 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 | `notify.ts` | AI 忙完发系统通知 | 自动 | 无 |
 | `permission-gate.ts` | Codex 风格权限审批（4 种模式） | 自动 | `/permission` |
 | `secret-guard.ts` | 密钥保护（拦截 + 屏蔽敏感信息） | 自动 | `/secret`（诊断用） |
+| `pi-computer-use/` | 电脑控制（桌面 + 浏览器自动化，fork 自 [injaneity/pi-computer-use](https://github.com/injaneity/pi-computer-use)，MIT） | 自动 | `/computer-use` |
+
+### 🖥️ computer-use（fork 版）
+
+完整源码位于 `pi-computer-use/`，可自由修改。Windows 原生 helper（`windows-bridge.exe`）需在**首次安装的机器**上编译：
+
+```bash
+# 在 pi-computer-use/ 目录下（需 Rust 工具链）
+node scripts/build-native.mjs --platform windows
+```
+
+或在 `pi-computer-use/` 下运行 `npm run build:windows`。
 
 ### 🔄 loop.ts — 循环模式
 
