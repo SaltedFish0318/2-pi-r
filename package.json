@@ -1,0 +1,10 @@
+{
+  "name": "pi-tools",
+  "version": "0.1.0",
+  "description": "Pi 自定义扩展集合：loop 循环模式、notify 通知、permission 权限审批、secret 密钥保护",
+  "keywords": ["pi-package", "pi", "pi-coding-agent"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}

@@ -1,0 +1,371 @@
+/**
+ * Loop Mode Extension v3
+ *
+ * Continuously iterates on a goal until completion, similar to
+ * Claude Code's /loop and Codex's goal mode.
+ *
+ * Usage:
+ *   /loop <goal>           — Start loop（如：/loop 帮我学英语）
+ *   /loop max=100 <goal>   — 自定义最大轮数
+ *   /loop stop             — 停止并清除循环
+ *   /loop pause            — 暂停循环（保留进度）
+ *   /loop resume           — 恢复暂停的循环
+ *   /loop status           — 查看当前进度
+ *
+ * AI 回复末尾用 [LOOP_CONTINUE] 表示需要继续，
+ * 用 [LOOP_DONE] 表示目标已完成。
+ * 按 Escape 可随时中止。
+ */
+
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+// =========================================================================
+// 状态定义
+// =========================================================================
+
+interface LoopState {
+	goal: string;
+	iteration: number;
+	maxIterations: number;
+	active: boolean;
+	paused: boolean;
+}
+
+const DEFAULT_MAX_ITERATIONS = 50;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
+
+// =========================================================================
+// 工具函数
+// =========================================================================
+
+function parseArgs(input: string): { goal: string; maxIterations: number } {
+	let maxIterations = DEFAULT_MAX_ITERATIONS;
+	let goal = input;
+
+	const maxMatch = goal.match(/^max=(\d+)\s+(.+)/);
+	if (maxMatch) {
+		maxIterations = parseInt(maxMatch[1]!, 10);
+		if (maxIterations < 1) maxIterations = DEFAULT_MAX_ITERATIONS;
+		if (maxIterations > 200) maxIterations = 200;
+		goal = maxMatch[2]!;
+	}
+
+	return { goal, maxIterations };
+}
+
+function detectMarkers(text: string): { done: boolean; cont: boolean } {
+	return {
+		done: text.includes("[LOOP_DONE]"),
+		cont: text.includes("[LOOP_CONTINUE]"),
+	};
+}
+
+function getLastAssistantText(entries: any[]): string {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (e.type === "message" && e.message.role === "assistant") {
+			const msg = e.message as { content?: string | { type: string; text: string }[] };
+			if (Array.isArray(msg.content)) {
+				let text = "";
+				for (const block of msg.content) {
+					if (block.type === "text") text += block.text;
+				}
+				return text;
+			}
+			if (typeof msg.content === "string") return msg.content;
+			break;
+		}
+	}
+	return "";
+}
+
+// =========================================================================
+// 扩展入口
+// =========================================================================
+
+export default function (pi: ExtensionAPI) {
+	let state: LoopState | null = null;
+
+	// -----------------------------------------------------------------------
+	// UI 更新
+	// -----------------------------------------------------------------------
+	function updateUI(ctx: ExtensionContext) {
+		if (!state || !state.active) {
+			ctx.ui.setStatus("loop", undefined);
+			ctx.ui.setWidget("loop", undefined);
+			return;
+		}
+
+		const prefix = state.paused ? "⏸" : "🔄";
+		const shortGoal = state.goal.length > 30
+			? state.goal.substring(0, 28) + "…"
+			: state.goal;
+
+		ctx.ui.setStatus(
+			"loop",
+			ctx.ui.theme.fg(
+				state.paused ? "warning" : "accent",
+				`${prefix} ${shortGoal} [${state.iteration}/${state.maxIterations}]`,
+			),
+		);
+
+		const pct = Math.min(100, Math.round((state.iteration / state.maxIterations) * 100));
+		const barWidth = 20;
+		const filled = Math.round((pct / 100) * barWidth);
+
+		ctx.ui.setWidget("loop", [
+			`${prefix} 循环进行中`,
+			`目标: ${state.goal}`,
+			`进度: ${"█".repeat(filled)}${"░".repeat(barWidth - filled)} ${pct}%`,
+			`轮次: ${state.iteration} / ${state.maxIterations}`,
+			state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
+		]);
+	}
+
+	// -----------------------------------------------------------------------
+	// 发送消息（带重试）
+	// -----------------------------------------------------------------------
+	function sendMessage(msg: string, ctx: ExtensionContext): void {
+		let attempt = 0;
+
+		function trySend() {
+			attempt++;
+			try {
+				if (ctx.isIdle()) {
+					pi.sendUserMessage(msg);
+				} else {
+					pi.sendUserMessage(msg, { deliverAs: "followUp" });
+				}
+				// 发送成功
+			} catch (err) {
+				if (attempt < MAX_RETRIES) {
+					console.error(`[loop] sendMessage 失败 (第${attempt}次)，${RETRY_DELAY_MS}ms 后重试:`, err);
+					setTimeout(trySend, RETRY_DELAY_MS);
+				} else {
+					console.error(`[loop] sendMessage 已重试 ${MAX_RETRIES} 次仍失败:`, err);
+					if (state) {
+						state.active = false;
+						state.paused = true;
+						updateUI(ctx);
+						ctx.ui.notify("⚠️ 循环因发送消息失败已暂停，/loop resume 可重试", "error");
+					}
+				}
+			}
+		}
+
+		trySend();
+	}
+
+	// -----------------------------------------------------------------------
+	// 生成续跑消息
+	// -----------------------------------------------------------------------
+	function buildFollowUpMessage(): string {
+		return (
+			`继续完成目标: "${state!.goal}"\n` +
+			`这是第 ${state!.iteration}/${state!.maxIterations} 轮。\n` +
+			`完成后请用 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记。`
+		);
+	}
+
+	function buildInitialMessage(): string {
+		return (
+			`你的目标是: "${state!.goal}"\n\n` +
+			`这是第 ${state!.iteration}/${state!.maxIterations} 轮。\n` +
+			"规则：\n" +
+			"1. 每轮结束后，用 [LOOP_CONTINUE] 表示还需要继续。\n" +
+			"2. 如果目标已完成，用 [LOOP_DONE] 表示。\n" +
+			"3. 每轮都要有实质进展。"
+		);
+	}
+
+	// =======================================================================
+	// /loop 命令
+	// =======================================================================
+	pi.registerCommand("loop", {
+		description: "循环工作 /loop <goal> | max=N <goal> | stop | pause | resume | status",
+		handler: async (args, ctx) => {
+			const input = (args ?? "").trim();
+
+			if (!input) {
+				ctx.ui.notify(
+					"用法: /loop <目标> | /loop max=100 <目标> | stop | pause | resume | status",
+					"info",
+				);
+				return;
+			}
+
+			// --- stop ---
+			if (input === "stop") {
+				if (state) {
+					const wasActive = state.active;
+					state = null;
+					updateUI(ctx);
+					ctx.ui.notify(wasActive ? "🛑 循环已停止" : "没有活跃的循环", "info");
+				} else {
+					ctx.ui.notify("当前没有循环", "info");
+				}
+				return;
+			}
+
+			// --- pause ---
+			if (input === "pause" || input === "p") {
+				if (!state) {
+					ctx.ui.notify("当前没有循环", "info");
+					return;
+				}
+				if (!state.active) {
+					ctx.ui.notify("循环已经暂停", "warning");
+					return;
+				}
+				state.paused = true;
+				state.active = false;
+				updateUI(ctx);
+				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${state.maxIterations} 轮）`, "info");
+				return;
+			}
+
+			// --- resume ---
+			if (input === "resume" || input === "r") {
+				if (!state) {
+					ctx.ui.notify("当前没有循环，请用 /loop <目标> 开始", "info");
+					return;
+				}
+				if (state.active && !state.paused) {
+					ctx.ui.notify("循环已经在运行", "info");
+					return;
+				}
+
+				state.active = true;
+				state.paused = false;
+				updateUI(ctx);
+				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${state.maxIterations} 轮）`, "info");
+				sendMessage(buildFollowUpMessage(), ctx);
+				return;
+			}
+
+			// --- status ---
+			if (input === "status") {
+				if (state) {
+					const status = state.active
+						? `🔄 第 ${state.iteration}/${state.maxIterations} 轮`
+						: state.paused
+							? `⏸ 已暂停（第 ${state.iteration} 轮）`
+							: "已停止";
+					ctx.ui.notify(`${status} — 目标: "${state.goal}"`, "info");
+				} else {
+					ctx.ui.notify("当前没有循环", "info");
+				}
+				return;
+			}
+
+			// --- 启动新循环 ---
+			if (state?.active && !state.paused) {
+				ctx.ui.notify("已有循环在运行，请先 /loop stop", "warning");
+				return;
+			}
+
+			// 覆盖暂停的循环
+			if (state) {
+				state = null;
+			}
+
+			const { goal, maxIterations } = parseArgs(input);
+
+			state = {
+				goal,
+				iteration: 1,
+				maxIterations,
+				active: true,
+				paused: false,
+			};
+
+			updateUI(ctx);
+			ctx.ui.notify(`🔄 循环开始: "${goal}"（最多 ${maxIterations} 轮）`, "info");
+			sendMessage(buildInitialMessage(), ctx);
+		},
+	});
+
+	// =======================================================================
+	// before_agent_start：注入系统提示
+	// =======================================================================
+	pi.on("before_agent_start", async (event) => {
+		if (!state?.active) return undefined;
+
+		return {
+			systemPrompt:
+				event.systemPrompt +
+				`\n\n## Loop Mode（循环模式）\n` +
+				`你正在循环执行以下目标:\n"${state.goal}"\n` +
+				`当前进度: 第 ${state.iteration}/${state.maxIterations} 轮\n\n` +
+				`规则:\n` +
+				`1. 每次回复末尾，必须加上 [LOOP_CONTINUE] 或 [LOOP_DONE]\n` +
+				`2. [LOOP_CONTINUE] = 还需要继续，下一轮自动续跑\n` +
+				`3. [LOOP_DONE] = 目标已完成\n` +
+				`4. 每轮都要有实质进展，不要重复做同一件事\n` +
+				`5. 不要每步都征求用户同意，主动使用所有可用工具`,
+		};
+	});
+
+	// =======================================================================
+	// agent_end：每轮结束后检查标记，决定是否继续
+	// =======================================================================
+	pi.on("agent_end", async (_event, ctx) => {
+		if (!state?.active || state.paused) return;
+
+		// 解析标记
+		const lastText = getLastAssistantText(ctx.sessionManager.getEntries());
+		const { done, cont } = detectMarkers(lastText);
+
+		// --- [LOOP_DONE] → 目标完成 ---
+		if (done) {
+			const finalIteration = state.iteration;
+			state.active = false;
+			ctx.ui.setWidget("loop", [
+				"✅ 目标已完成! 🎉",
+				`目标: ${state.goal}`,
+				`完成轮次: 第 ${finalIteration} 轮`,
+			]);
+			setTimeout(() => {
+				if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
+			}, 5000);
+			ctx.ui.notify("✅ 目标完成! 🎉", "success");
+			return;
+		}
+
+		// --- 无标记 → 暂停 ---
+		if (!cont) {
+			state.active = false;
+			state.paused = true;
+			updateUI(ctx);
+			ctx.ui.notify("⏸ 循环暂停——回复中未找到 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记", "warning");
+			return;
+		}
+
+		// --- 已达最大轮数 → 停止 ---
+		if (state.iteration >= state.maxIterations) {
+			const finalIteration = state.iteration;
+			state.active = false;
+			ctx.ui.setWidget("loop", [
+				"🛑 循环已达最大轮数",
+				`目标: ${state.goal}`,
+				`已执行: ${finalIteration} 轮`,
+			]);
+			setTimeout(() => {
+				if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
+			}, 5000);
+			ctx.ui.notify(`🛑 已达最大 ${state.maxIterations} 轮`, "warning");
+			return;
+		}
+
+		// --- [LOOP_CONTINUE] → 继续下一轮 ---
+		state.iteration++;
+		updateUI(ctx);
+
+		// 延迟发送，等待 agent 完全进入空闲状态
+		setTimeout(() => {
+			if (!state?.active || state.paused) return;
+			sendMessage(buildFollowUpMessage(), ctx);
+		}, 500);
+	});
+}
