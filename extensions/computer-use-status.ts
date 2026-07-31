@@ -70,6 +70,8 @@ function summarize(tool: string, args: any): string {
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let windowStarted = false;
+	let agentActive = false;
+	let lastAction = "";
 
 	function ensureWindow() {
 		if (windowStarted) return;
@@ -104,19 +106,40 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// 执行开始：显示状态
+	// 回合边界：agent 开始 → 标记活跃（不立即显示，等第一个 computer-use 工具）
+	pi.on("agent_start", () => {
+		agentActive = true;
+	});
+
+	// 回合边界：agent 结束 → 隐藏窗口
+	pi.on("agent_end", () => {
+		agentActive = false;
+		lastAction = "";
+		clearStatus();
+	});
+	pi.on("agent_settled", () => {
+		agentActive = false;
+		lastAction = "";
+		clearStatus();
+	});
+
+	// 工具执行：更新具体动作（回合内持续显示，不闪）
 	pi.on("tool_execution_start", (event) => {
 		const label = CU_TOOLS[event.toolName];
 		if (!label) return;
+		if (!agentActive) agentActive = true;
 		ensureWindow();
 		const detail = summarize(event.toolName, event.args ?? {});
-		setStatus(`[pi] ${label}${detail ? ` ${detail}` : ""}…`);
+		lastAction = `[pi] ${label}${detail ? ` ${detail}` : ""}…`;
+		setStatus(lastAction);
 	});
 
-	// 执行结束：清空（窗口隐藏）
+	// 工具结束：保留状态（不隐藏，等 agent_end）
 	pi.on("tool_execution_end", (event) => {
 		if (!CU_TOOLS[event.toolName]) return;
-		clearStatus();
+		if (lastAction) {
+			setStatus(lastAction.replace(/…$/, " ✓"));
+		}
 	});
 
 	pi.registerCommand("cu-status", {
