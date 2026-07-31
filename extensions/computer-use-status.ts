@@ -19,19 +19,19 @@ const EXT_DIR = new URL(".", import.meta.url).pathname;
 const STATUS_FILE = join(homedir(), ".pi", "agent", "computer-use-status.txt");
 const WINDOW_SCRIPT = join(EXT_DIR, "..", "scripts", "status-window.ps1");
 
-// computer-use 的工具名 → 显示标签
+// computer-use 的工具名 → 显示标签（纯文字，WinForms 字体不支持 emoji）
 const CU_TOOLS: Record<string, string> = {
-	find_roots: "🔍 查找窗口",
-	observe_ui: "👀 观察界面",
-	search_ui: "🔎 搜索界面",
-	expand_ui: "🌳 展开界面",
-	inspect_ui: "🔬 检查控件",
-	act_ui: "🖱️ 执行操作",
-	read_text: "📖 读取文本",
-	wait_for: "⏳ 等待条件",
-	launch_browser: "🌐 启动浏览器",
-	navigate_browser: "🧭 页面导航",
-	evaluate_browser: "⚡ 浏览器执行",
+	find_roots: "查找窗口",
+	observe_ui: "观察界面",
+	search_ui: "搜索界面",
+	expand_ui: "展开界面",
+	inspect_ui: "检查控件",
+	act_ui: "执行操作",
+	read_text: "读取文本",
+	wait_for: "等待条件",
+	launch_browser: "启动浏览器",
+	navigate_browser: "页面导航",
+	evaluate_browser: "浏览器执行",
 };
 
 // 从工具参数生成简短摘要
@@ -110,7 +110,7 @@ export default function (pi: ExtensionAPI) {
 		if (!label) return;
 		ensureWindow();
 		const detail = summarize(event.toolName, event.args ?? {});
-		setStatus(`🤖 ${label}${detail ? ` ${detail}` : ""}…`);
+		setStatus(`[pi] ${label}${detail ? ` ${detail}` : ""}…`);
 	});
 
 	// 执行结束：清空（窗口隐藏）

@@ -6,9 +6,14 @@ Add-Type -AssemblyName System.Drawing
 $STATUS_FILE = Join-Path $env:USERPROFILE '.pi\agent\computer-use-status.txt'
 $WIN_TITLE = 'pi-cu-status'
 
-# 幂等：已有窗口则退出
-$existing = Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $WIN_TITLE }
-if ($existing) { exit 0 }
+# 幂等：文件锁标记（Windows Hidden 模式下 MainWindowTitle 不可靠）
+$LOCK_FILE = Join-Path $env:TEMP 'pi-cu-status.lock'
+if (Test-Path $LOCK_FILE) {
+  $pidInLock = [int]([System.IO.File]::ReadAllText($LOCK_FILE))
+  $alive = Get-Process -Id $pidInLock -ErrorAction SilentlyContinue
+  if ($alive) { exit 0 }
+}
+[System.IO.File]::WriteAllText($LOCK_FILE, [string]$PID)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $WIN_TITLE
@@ -40,7 +45,7 @@ $timer.Interval = 250
 $timer.Add_Tick({
   try {
     if (Test-Path $STATUS_FILE) {
-      $text = (Get-Content $STATUS_FILE -Raw -ErrorAction Stop).Trim()
+      $text = [System.IO.File]::ReadAllText($STATUS_FILE, [System.Text.Encoding]::UTF8).Trim()
       if ($text) {
         if (-not $form.Visible) { $form.Visible = $true }
         $label.Text = $text
