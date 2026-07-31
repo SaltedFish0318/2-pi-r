@@ -1,34 +1,140 @@
 # pi-tools
 
-Pi 自定义扩展集合，通过 Pi Package 机制分发，多台机器一行命令安装。
+Pi 自定义扩展集合（Pi Package），通过 GitHub 分发，多台电脑一行命令安装、一条命令更新。
 
-## 包含的扩展
-
-| 扩展 | 功能 | 命令 |
-|------|------|------|
-| `loop.ts` | 循环模式（类似 Claude Code /loop） | `/loop <目标>` |
-| `notify.ts` | AI 完成时系统通知 | 自动 |
-| `permission-gate.ts` | Codex 风格权限审批（4 种模式） | `/permission` |
-| `secret-guard.ts` | 密钥保护（拦截+屏蔽敏感信息） | 自动 + `/secret` 诊断 |
-
-## 安装
+## 📦 安装
 
 ```bash
-pi install git:github.com/<你的用户名>/pi-tools
+pi install git:github.com/SaltedFish0318/2-pi-r
 ```
 
-## 开发
+安装后重启 pi（或 `/reload`）生效。
+
+## 🧩 包含的扩展
+
+| 扩展 | 功能 | 是否自动 | 命令 |
+|------|------|:--------:|------|
+| `loop.ts` | 循环模式（类似 Claude Code `/loop` / Codex goal） | 手动 | `/loop <目标>` |
+| `notify.ts` | AI 忙完发系统通知 | 自动 | 无 |
+| `permission-gate.ts` | Codex 风格权限审批（4 种模式） | 自动 | `/permission` |
+| `secret-guard.ts` | 密钥保护（拦截 + 屏蔽敏感信息） | 自动 | `/secret`（诊断用） |
+
+### 🔄 loop.ts — 循环模式
+
+让 AI 持续迭代工作直到目标完成。
+
+```
+/loop <目标>            # 开始循环
+/loop max=100 <目标>    # 自定义最大轮数（默认 50，上限 200）
+/loop pause             # 暂停（保留进度）
+/loop resume            # 恢复
+/loop stop              # 停止
+/loop status            # 查看进度
+```
+
+AI 回复末尾的标记约定：
+- `[LOOP_CONTINUE]` = 还需要继续，下一轮自动续跑
+- `[LOOP_DONE]` = 目标已完成，循环停止
+
+### 🔔 notify.ts — 系统通知
+
+AI 完成工作等待输入时自动发送系统通知。自动识别终端协议：
+- Ghostty / iTerm2 / WezTerm / rxvt-unicode（OSC 777）
+- Kitty（OSC 99）
+- Windows Terminal（Windows Toast）
+
+### 🛡️ permission-gate.ts — 权限审批
+
+类似 Codex 的权限体系，拦截危险操作。
+
+```
+/permission                # 打开二级菜单选择模式
+/permission read-only      # 直接切换模式
+/permission clear          # 清除记住的决定
+```
+
+四种模式：
+
+| 模式 | 行为 |
+|------|------|
+| 🔍 read-only | 只放行读操作 |
+| 🤖 auto（默认） | 安全命令自动放行，危险操作询问 |
+| ❓ ask | 所有非读操作都询问 |
+| ⚡ full-access | 全部放行 |
+
+危险操作拦截范围：`rm -rf`、`sudo`、`chmod 777`、`git push --force`、`git reset --hard`、`npm publish`、`drop database`、`kill -9`、`reboot` 等 25 条规则 + `.env`、`.git/`、`credentials`、`node_modules/` 等敏感路径。
+
+询问弹窗四选项：允许一次 / 总是允许 / 不允许 / 总是不允许。
+
+### 🔐 secret-guard.ts — 密钥保护
+
+自动防护（无需任何操作）：
+
+| 时机 | 行为 |
+|------|------|
+| 会话启动 | 自动提示已监控的敏感值数量 |
+| AI 执行命令 | 命令含敏感值 → 自动阻止 |
+| 工具返回结果 | 输出含敏感值 → 替换为 `***redacted***` |
+
+监控来源：环境变量（`*API_KEY*` / `*SECRET*` / `*TOKEN*` / `*PASSWORD*` 等）+ `.env` 文件 + 内置密钥格式（`sk-`、`ghp_`、`AKIA`、JWT、PEM、Bearer 等）。
+
+诊断命令（可选）：`/secret` 查看状态、`/secret scan` 扫描项目、`/secret test` 自检、`/secret refresh` 重新收集。
+
+## 🔄 更新
 
 ```bash
-# 本地测试
+pi update git:github.com/SaltedFish0318/2-pi-r
+# 或更新所有包
+pi update --all
+```
+
+## 🪟 跨平台（Ubuntu ↔ Windows）
+
+扩展全部使用 `homedir()` 动态路径，无硬编码，可跨平台运行。`notify.ts` 在 Windows 上自动使用 Windows Toast。
+
+### Windows 安装步骤
+
+```powershell
+# 1. 安装 pi
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# 2. 安装包
+pi install git:github.com/SaltedFish0318/2-pi-r
+
+# 3. 登录
+pi
+/login
+```
+
+### SSH 端口问题（国内网络）
+
+GitHub 22 端口常被墙，配置 SSH 走 443 端口（Ubuntu 的 `~/.ssh/config` 或 Windows 的 `C:\Users\<用户>\.ssh\config`）：
+
+```
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+```
+
+## ⚙️ 其他配置（不属于本包）
+
+`permissions.json`（权限模式持久化）是个人配置，不随包分发，装完包后每台机器单独设置：
+
+```bash
+/permission        # 选择模式，自动写入 ~/.pi/agent/permissions.json
+```
+
+## 🛠️ 开发
+
+```bash
+git clone git@github.com:SaltedFish0318/2-pi-r.git
+# 本地测试单个扩展
 pi -e ./extensions/loop.ts
-
-# 发布到 npm（可选）
-npm publish
+# 修改后推送
+git add . && git commit -m "update" && git push
 ```
 
-## 更新
+## 📝 变更记录
 
-```bash
-pi update pi-tools   # 或 pi update --all
-```
+- **0.1.0** 初始版本：loop / notify / permission-gate / secret-guard
