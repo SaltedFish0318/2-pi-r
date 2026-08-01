@@ -151,11 +151,27 @@ Host github.com
 
 ```bash
 git clone git@github.com:SaltedFish0318/2-pi-r.git
+npm install        # 安装测试依赖（vitest 等）
+npm test           # 运行单元测试（24 个：permission 8 / secret-guard 5 / loop 11）
 # 本地测试单个扩展
 pi -e ./extensions/loop.ts
 # 修改后推送
 git add . && git commit -m "update" && git push
 ```
+
+## 🔧 loop.ts 结构说明（~1100 行，单文件未拆分）
+
+状态机（state）在 factory 闭包内共享，物理拆分需引入模块级状态（跨文件耦合 + 回归风险）；当前单文件分区清晰（持久化/契约/Judge/UI/自动触发/命令路由）+ 24 个单元测试已保证可维护性。
+
+## 💾 持久化文件与多机同步
+
+| 文件 | 内容 | 跨机器 |
+|------|------|--------|
+| `~/.pi/agent/loop-state.json` | 当前循环状态 | 复制文件即同步 |
+| `~/.pi/agent/loop-tasks.json` | 自动触发任务 | 复制文件即同步 |
+| 会话 custom entry（appendEntry） | 分支状态 | 跟随会话文件 |
+
+多机使用：把两个 json 复制到另一台机器的 `~/.pi/agent/` 即可恢复循环。
 
 ## 📝 变更记录
 

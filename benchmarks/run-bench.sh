@@ -2,7 +2,8 @@
 # Pi Agent 表现基准测试（A/B 对比）
 # A: 干净配置（无扩展）  B: 完整增强配置（2-pi-r + MCP + observational-memory）
 #
-# 用法: bash benchmarks/run-bench.sh [--only-a|--only-b]
+# 用法: bash benchmarks/run-bench.sh [--only-a|--only-b] [--rounds N]
+#   --rounds N  每组每个任务跑 N 轮（取通过率 + 汇总），默认 1
 # 结果: benchmarks/results/results-<日期>.md
 
 set -u
@@ -65,41 +66,61 @@ run_group() {
   for i in 1 2 3 4 5; do
     local prompt="${TASK_PROMPTS[$i]//__WS__/$WS}"
     local verify="${TASK_VERIFY[$i]//__WS__/$WS}"
-    local ok=0 dur=0
-    # 最多 3 次尝试（容忍 opencode-go 网关连接错误等网络噪声）
-    for attempt in 1 2 3; do
-      local t0=$(date +%s)
-      local out
-      out=$(PI_CODING_AGENT_DIR="$AGENT_DIR" timeout 300 pi -p "$prompt" --session-dir "$SESS" --name "bench-$GROUP-$i" 2>&1)
-      local t1=$(date +%s)
-      dur=$((t1 - t0))
-      if [ "$verify" = "true" ] || eval "$verify" 2>/dev/null; then
-        ok=1; break
-      fi
-      # 连接错误检测（重试无意义则直接放弃）
-      if echo "$out" | grep -qi "Connection error\|rate limit\|overloaded"; then
-        NERR=$((NERR + 1))
-        sleep 3
-        continue
-      fi
+    local ok=0 dur=0 total_dur=0
+    # 每任务跑 ROUNDS 轮：全部通过才算通过（结果取最后一次耗时），并统计轮次通过率
+    local rounds_pass=0 rounds_total=0
+    for round in $(seq 1 "$ROUNDS"); do
+      # 每轮最多 3 次尝试（容忍 opencode-go 网关连接错误等网络噪声）
+      for attempt in 1 2 3; do
+        local t0=$(date +%s)
+        local out
+        out=$(PI_CODING_AGENT_DIR="$AGENT_DIR" timeout 300 pi -p "$prompt" --session-dir "$SESS" --name "bench-$GROUP-$i-r$round" 2>&1)
+        local t1=$(date +%s)
+        dur=$((t1 - t0))
+        if [ "$verify" = "true" ] || eval "$verify" 2>/dev/null; then
+          rounds_pass=$((rounds_pass + 1))
+          total_dur=$((total_dur + dur))
+          break
+        fi
+        if echo "$out" | grep -qi "Connection error\|rate limit\|overloaded"; then
+          NERR=$((NERR + 1))
+          sleep 3
+          continue
+        fi
+      done
+      rounds_total=$((rounds_total + 1))
     done
 
-    if [ "$ok" = "1" ]; then
+    if [ "$ROUNDS" -le 1 ] && [ "$rounds_pass" -ge 1 ]; then
       PASS=$((PASS + 1))
       echo "| ${TASK_NAMES[$i]} | ✅ | ${dur}s | - |" >> "$MD"
+    elif [ "$ROUNDS" -gt 1 ]; then
+      PASS=$((PASS + rounds_pass))
+      FAIL=$((FAIL + (rounds_total - rounds_pass)))
+      echo "| ${TASK_NAMES[$i]} | ${rounds_pass}/${rounds_total} | ${total_dur}s | - |" >> "$MD"
     else
       FAIL=$((FAIL + 1))
       echo "| ${TASK_NAMES[$i]} | ❌ | ${dur}s | 验证失败 |" >> "$MD"
     fi
   done
   echo "" >> "$MD"
-  echo "## 汇总: $PASS/5 通过, 失败 $FAIL, 网络错误 $NERR 次" >> "$MD"
+  if [ "$ROUNDS" -gt 1 ]; then
+    echo "## 汇总: $PASS/$(($ROUNDS * 5)) 轮次通过, 失败 $FAIL, 网络错误 $NERR 次（${ROUNDS} 轮 × 5 任务）" >> "$MD"
+  else
+    echo "## 汇总: $PASS/5 通过, 失败 $FAIL, 网络错误 $NERR 次" >> "$MD"
+  fi
   echo "✅ $GROUP 完成: $PASS/5 ($MD)"
 }
 
 ONLY=""
-[ "${1:-}" = "--only-a" ] && ONLY=1
-[ "${1:-}" = "--only-b" ] && ONLY=2
+ROUNDS=1
+for arg in "$@"; do
+  case "$arg" in
+    --only-a) ONLY=1 ;;
+    --only-b) ONLY=2 ;;
+    --rounds=*) ROUNDS=${arg#--rounds=} ;;
+  esac
+done
 
 if [ "$ONLY" != "2" ]; then
   echo "=== 运行 A 组（干净配置）==="

@@ -116,7 +116,11 @@ function loadStateFromDisk(): LoopState | null {
 			judgeContinues: d.judgeContinues ?? 0,
 			phase: (d.phase as "contract" | "executing") ?? "executing",
 		};
-	} catch {
+	} catch (err) {
+		// 预期：文件不存在（无循环）；意外：JSON 损坏等 → 记录日志
+		if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+			debugLog("loadStateFromDisk 读取异常: " + (err as Error).message);
+		}
 		return null;
 	}
 }
@@ -162,6 +166,21 @@ function debugLog(msg: string): void {
 		// 忽略日志写入失败
 	}
 	console.log("[loop] " + msg);
+}
+
+// =========================================================================
+// 跨模块实例通信标记（reload 后新模块读取旧模块设置的标志）
+// =========================================================================
+
+declare global {
+	var __loopStaleUI: boolean | undefined;
+}
+
+function getStaleFlag(): boolean {
+	return globalThis.__loopStaleUI === true;
+}
+function setStaleFlag(v: boolean): void {
+	globalThis.__loopStaleUI = v;
 }
 
 // =========================================================================
@@ -264,6 +283,23 @@ function detectMarkers(text: string): { done: boolean; cont: boolean } {
 		done: text.includes("[LOOP_DONE]"),
 		cont: text.includes("[LOOP_CONTINUE]"),
 	};
+}
+
+interface TextContentBlock {
+	type: "text";
+	text: string;
+}
+
+function extractText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.filter((b: unknown): b is TextContentBlock =>
+				!!b && typeof b === "object" && (b as TextContentBlock).type === "text")
+			.map((b) => b.text)
+			.join(" ");
+	}
+	return "";
 }
 
 function getLastAssistantText(entries: any[]): string {
@@ -614,13 +650,13 @@ export default function (pi: ExtensionAPI) {
 		}
 		ctx.ui.setWidget("loop", undefined);
 		ctx.ui.setStatus("loop", undefined);
-		(globalThis as any).__loopStaleUI = true;
+		setStaleFlag(true);
 	});
 	pi.on("session_start", (e, ctx) => {
-		debugLog("session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI + " restored=" + !!state);
-		const stale = (globalThis as any).__loopStaleUI === true;
+		debugLog("session_start reason=" + e.reason + " stale=" + getStaleFlag() + " restored=" + !!state);
+		const stale = getStaleFlag();
 		if (stale) {
-			(globalThis as any).__loopStaleUI = false;
+			setStaleFlag(false);
 			ctx.ui.setWidget("loop", undefined);
 			ctx.ui.setStatus("loop", undefined);
 			debugLog("残留 UI 已清理");
@@ -640,7 +676,7 @@ export default function (pi: ExtensionAPI) {
 					for (let i = branch.length - 1; i >= 0; i--) {
 						const en = branch[i];
 						if (en.type === "custom" && en.customType === "loop-state") {
-							return !!(en.data as any)?.ended;
+							return !!((en.data as Record<string, unknown> | null | undefined)?.ended);
 						}
 					}
 				} catch { /* ignore */ }
@@ -700,8 +736,8 @@ export default function (pi: ExtensionAPI) {
 	loopTimer = setInterval(() => {
 		if (moduleDead) return;
 		// 兜底：若残留标志存在（reload 后事件链失效），主动清理
-		if ((globalThis as any).__loopStaleUI && latestCtx) {
-			(globalThis as any).__loopStaleUI = false;
+		if (getStaleFlag() && latestCtx) {
+			setStaleFlag(false);
 			ctxForAuto()?.ui.setWidget("loop", undefined);
 			ctxForAuto()?.ui.setStatus("loop", undefined);
 			debugLog("interval 兜底清理残留 UI");
@@ -863,15 +899,13 @@ export default function (pi: ExtensionAPI) {
 		for (let i = entries.length - 1; i >= 0 && parts.length < 5; i--) {
 			const e = entries[i];
 			if (e.type !== "message") continue;
-			const m = e.message as any;
+			const m = e.message as { role?: string; content?: unknown };
 			if (m.role === "assistant") {
-				let c = m.content;
-				if (Array.isArray(c)) c = c.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ");
-				if (typeof c === "string" && c.trim()) parts.push("AI: " + c.trim().slice(0, 300));
+				const c = extractText(m.content);
+				if (c.trim()) parts.push("AI: " + c.trim().slice(0, 300));
 			} else if (m.role === "toolResult") {
-				let c = m.content;
-				if (Array.isArray(c)) c = c.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ");
-				if (typeof c === "string" && c.trim()) parts.push("工具结果: " + c.trim().slice(0, 200));
+				const c = extractText(m.content);
+				if (c.trim()) parts.push("工具结果: " + c.trim().slice(0, 200));
 			}
 		}
 		return parts.reverse().join("\n");
