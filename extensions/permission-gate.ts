@@ -90,15 +90,29 @@ const READ_COMMANDS = [
 	"git config",
 ];
 
+/**
+ * 把危险命令名转成"作为命令执行"的正则：
+ * 只匹配命令位置（行首或 ;/&&/| 之后，可带 sudo），
+ * 不匹配参数/搜索文本/字符串里的关键词（如 grep "shutdown" 不误报）。
+ */
+function asCmd(name: string): string {
+	return `(^|[;&|\\n]\\s*)(sudo\\s+)?${name}(\\s|$)`;
+}
+
 const DANGEROUS_BASH: { pattern: string; label: string }[] = [
-	{ pattern: "\\brm\\s+-rf", label: "强制递归删除 (rm -rf)" },
-	{ pattern: "\\brm\\s+--recursive", label: "递归删除 (rm --recursive)" },
-	{ pattern: "\\brmdir\\s+/", label: "删除根目录" },
-	{ pattern: "\\bdd\\s+", label: "dd 磁盘操作" },
-	{ pattern: "\\bmkfs\\b", label: "格式化 (mkfs)" },
-	{ pattern: "\\bsudo\\b", label: "sudo 提权" },
-	{ pattern: "\\bchmod\\s+777", label: "chmod 777" },
-	{ pattern: "\\bchown\\s+\\d+", label: "chown 修改所有者" },
+	{ pattern: asCmd("rm\\s+-rf"), label: "强制递归删除 (rm -rf)" },
+	{ pattern: asCmd("rm\\s+--recursive"), label: "递归删除 (rm --recursive)" },
+	{ pattern: asCmd("rmdir\\s+/"), label: "删除根目录" },
+	{ pattern: asCmd("dd"), label: "dd 磁盘操作" },
+	{ pattern: asCmd("mkfs"), label: "格式化 (mkfs)" },
+	{ pattern: asCmd("sudo"), label: "sudo 提权" },
+	{ pattern: asCmd("chmod\\s+777"), label: "chmod 777" },
+	{ pattern: asCmd("chown\\s+\\d+"), label: "chown 修改所有者" },
+	{ pattern: asCmd("kill\\s+-9"), label: "强制杀进程 (kill -9)" },
+	{ pattern: asCmd("reboot"), label: "重启系统" },
+	{ pattern: asCmd("shutdown"), label: "关机" },
+	{ pattern: asCmd("poweroff"), label: "关机" },
+	{ pattern: asCmd("fdisk"), label: "磁盘分区 (fdisk)" },
 	{ pattern: "git\\s+push\\s+--force", label: "强制推送 (git push --force)" },
 	{ pattern: "git\\s+push\\s+-f\\b", label: "强制推送 (git push -f)" },
 	{ pattern: "git\\s+reset\\s+--hard", label: "硬重置 (git reset --hard)" },
@@ -108,11 +122,6 @@ const DANGEROUS_BASH: { pattern: string; label: string }[] = [
 	{ pattern: "drop\\s+database", label: "删除数据库" },
 	{ pattern: "drop\\s+table", label: "删除数据表" },
 	{ pattern: "truncate\\s+table", label: "清空数据表" },
-	{ pattern: "kill\\s+-9", label: "强制杀进程 (kill -9)" },
-	{ pattern: "\\breboot\\b", label: "重启系统" },
-	{ pattern: "\\bshutdown\\b", label: "关机" },
-	{ pattern: "\\bpoweroff\\b", label: "关机" },
-	{ pattern: "\\bfdisk\\b", label: "磁盘分区 (fdisk)" },
 	{ pattern: "curl.*-o\\s+/etc", label: "写入系统目录 (curl -o /etc)" },
 	{ pattern: "wget.*-O\\s+/etc", label: "写入系统目录 (wget -O /etc)" },
 	{ pattern: "tee\\s+/etc", label: "写入系统目录 (tee /etc)" },
