@@ -85,6 +85,8 @@ export default function (pi: ExtensionAPI) {
 				{ windowsHide: true },
 			);
 			child.on("error", () => { windowStarted = false; });
+			// 进程退出（如右击关闭窗口）→ 允许下次操作重新启动
+			child.on("exit", () => { windowStarted = false; });
 		} catch {
 			windowStarted = false;
 		}
