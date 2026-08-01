@@ -22,6 +22,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { complete, type UserMessage } from "@earendil-works/pi-ai/compat";
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -39,6 +40,8 @@ function persistState(s: LoopState | null): void {
 	try {
 		if (!s) {
 			fs.rmSync(STATE_FILE, { force: true });
+			// 分支持久化：ended 标记，防止旧分支恢复已停止的循环
+			piRef?.appendEntry("loop-state", { ended: true, ts: Date.now() });
 			return;
 		}
 		const out = {
@@ -52,9 +55,41 @@ function persistState(s: LoopState | null): void {
 			pausedAt: s.pausedAt ?? null,
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
+		// 分支持久化（pi 原生：跟随 fork/树导航/压缩），与文件双写
+		piRef?.appendEntry("loop-state", { ...out, ts: Date.now() });
 	} catch (err) {
 		debugLog("persistState 失败: " + (err as Error).message + " @ " + STATE_FILE);
 	}
+}
+
+/** 从当前分支恢复状态（pi 原生方式，分支内最后一条有效 entry） */
+function loadStateFromBranch(ctx: ExtensionContext): LoopState | null {
+	try {
+		const branch = ctx.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const e = branch[i];
+			if (e.type === "custom" && e.customType === "loop-state") {
+				const d = e.data as Record<string, unknown> | null | undefined;
+				if (!d) continue;
+				if (d.ended) return null; // 该分支循环已结束
+				if (typeof d.goal === "string" && d.goal) {
+					return {
+						goal: d.goal,
+						iteration: (d.iteration as number) ?? 1,
+						maxIterations: d.maxIterations === null ? Infinity : ((d.maxIterations as number) ?? Infinity),
+						active: !!d.active,
+						paused: !!d.paused,
+						startedAt: (d.startedAt as number) ?? Date.now(),
+						pausedMs: (d.pausedMs as number) ?? 0,
+						pausedAt: (d.pausedAt as number | null) ?? undefined,
+					};
+				}
+			}
+		}
+	} catch (err) {
+		debugLog("loadStateFromBranch 失败: " + (err as Error).message);
+	}
+	return null;
 }
 
 /** 从磁盘恢复循环状态（未完成未停止时返回，否则 null） */
@@ -135,6 +170,7 @@ interface LoopState {
 	startedAt: number; // 循环开始时间戳（ms），用于显示已运行时长
 	pausedAt?: number; // 进入暂停的时间戳，暂停期间时间冻结
 	pausedMs: number; // 累计暂停时长（ms），resume 时累加
+	pendingJudge?: boolean; // [LOOP_DONE] 后正在裁判验证，防止重复触发
 }
 
 /**
@@ -244,7 +280,8 @@ function getLastAssistantText(entries: any[]): string {
 // =========================================================================
 
 export default function (pi: ExtensionAPI) {
-	// 启动/重载时从磁盘恢复持久化状态
+	piRef = pi;
+	// 启动/重载时从磁盘恢复持久化状态（分支状态在 session_start 时优先覆盖）
 	let state: LoopState | null = loadStateFromDisk();
 	if (state) {
 		debugLog("恢复持久化状态: goal=" + state.goal.slice(0, 40) + " active=" + state.active + " paused=" + state.paused + " iter=" + state.iteration);
@@ -418,6 +455,7 @@ export default function (pi: ExtensionAPI) {
 				state.paused = true;
 				state.active = false;
 				state.pausedAt = Date.now();
+				pendingSend = false; // 暂停时取消待发送
 				persistState(state);
 				updateUI(ctx);
 				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
@@ -441,6 +479,7 @@ export default function (pi: ExtensionAPI) {
 					state.pausedMs = (state.pausedMs ?? 0) + (Date.now() - state.pausedAt);
 					state.pausedAt = undefined;
 				}
+				pendingSend = false;
 				persistState(state);
 				updateUI(ctx);
 				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
@@ -530,6 +569,32 @@ export default function (pi: ExtensionAPI) {
 			debugLog("残留 UI 已清理");
 		}
 		latestCtx = ctx;
+
+		// --- 分支状态优先恢复（pi 原生，跟随 fork/导航）；文件状态兜底 ---
+		const branchState = loadStateFromBranch(ctx);
+		if (branchState !== null) {
+			state = branchState;
+			persistState(state); // 同步回文件
+			debugLog("分支恢复: goal=" + state.goal.slice(0, 30) + " active=" + state.active);
+		} else {
+			const branchEnded = (() => {
+				try {
+					const branch = ctx.sessionManager.getBranch();
+					for (let i = branch.length - 1; i >= 0; i--) {
+						const en = branch[i];
+						if (en.type === "custom" && en.customType === "loop-state") {
+							return !!(en.data as any)?.ended;
+						}
+					}
+				} catch { /* ignore */ }
+				return false;
+			})();
+			if (branchEnded) {
+				state = null;
+				persistState(null); // 该分支已结束，清理文件残留
+				debugLog("分支标记已结束，清除状态");
+			}
+		}
 
 		// --- 恢复持久化的循环 ---
 		if (state?.paused) {
@@ -730,6 +795,70 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// =======================================================================
+	// 完成度裁判（LLM Judge）：[LOOP_DONE] 时验证是否真正完成
+	// =======================================================================
+
+	/** 收集最近的进展证据（AI 回复 + 工具结果摘要） */
+	function getRecentEvidence(ctx: ExtensionContext): string {
+		const entries = ctx.sessionManager.getEntries();
+		const parts: string[] = [];
+		for (let i = entries.length - 1; i >= 0 && parts.length < 5; i--) {
+			const e = entries[i];
+			if (e.type !== "message") continue;
+			const m = e.message as any;
+			if (m.role === "assistant") {
+				let c = m.content;
+				if (Array.isArray(c)) c = c.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ");
+				if (typeof c === "string" && c.trim()) parts.push("AI: " + c.trim().slice(0, 300));
+			} else if (m.role === "toolResult") {
+				let c = m.content;
+				if (Array.isArray(c)) c = c.filter((b: any) => b.type === "text").map((b: any) => b.text).join(" ");
+				if (typeof c === "string" && c.trim()) parts.push("工具结果: " + c.trim().slice(0, 200));
+			}
+		}
+		return parts.reverse().join("\n");
+	}
+
+	/** 调用 LLM 裁判（当前模型，fresh context） */
+	async function runJudge(ctx: ExtensionContext, goal: string, evidence: string): Promise<{ verdict: "done" | "continue"; reason: string } | null> {
+		try {
+			if (!ctx.model) return null;
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+			if (!auth.ok || !auth.apiKey) return null;
+			const userMessage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: `目标: ${goal}\n\n完成声明: AI 报告 [LOOP_DONE]\n\n最近进展证据:\n${evidence}` }],
+				timestamp: Date.now(),
+			};
+			const resp = await complete(
+				ctx.model,
+				{
+					systemPrompt: `你是目标完成度裁判。根据给出的证据严格判断目标是否真正完成。\n只输出 JSON，格式: {"verdict":"done"|"continue","reason":"简短原因"}\n- done: 证据充分支持目标已完成\n- continue: 目标未完成或有明显差距，reason 说明还缺什么`,
+					messages: [userMessage],
+				},
+				{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: undefined },
+			);
+			const text = resp.content
+				.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+			if (/"verdict"\s*:\s*"done"/.test(text)) {
+				const reason = text.match(/"reason"\s*:\s*"([^"]*)"/)?.[1] ?? "";
+				return { verdict: "done", reason };
+			}
+			if (/"verdict"\s*:\s*"continue"/.test(text)) {
+				const reason = text.match(/"reason"\s*:\s*"([^"]*)"/)?.[1] ?? "证据不足";
+				return { verdict: "continue", reason };
+			}
+			debugLog("judge 响应无法解析: " + text.slice(0, 200));
+			return null;
+		} catch (err) {
+			debugLog("judge 调用失败: " + (err as Error).message);
+			return null;
+		}
+	}
+
+	// =======================================================================
 	// agent_end：每轮结束后检查标记，决定是否继续
 	// =======================================================================
 	pi.on("agent_end", async (_event, ctx) => {
@@ -753,20 +882,50 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- [LOOP_DONE] → 目标完成 ---
+		// --- [LOOP_DONE] → 目标完成（先经 LLM 裁判验证） ---
 		if (done) {
+			if (state.pendingJudge) return; // 裁判中，防重复
+
 			const finalIteration = state.iteration;
+			// 裁判验证：防 AI 假完成
+			state.pendingJudge = true;
+			persistState(state);
+			ctx.ui.notify("🔍 完成度裁判验证中...", "info");
+			const evidence = getRecentEvidence(ctx);
+			const verdict = await runJudge(ctx, state.goal, evidence);
+			state.pendingJudge = false;
+
+			if (verdict?.verdict === "continue") {
+				// 裁判判定未完成 → 继续循环并反馈差距
+				state.active = true;
+				state.paused = false;
+				state.iteration++; // 进入下一轮
+				persistState(state);
+				updateUI(ctx);
+				ctx.ui.notify(`⚖️ 裁判判定未完成，继续执行 — ${verdict.reason}`, "warning");
+				setTimeout(() => {
+					if (moduleDead || !state?.active || state.paused) return;
+					sendMessage(buildFollowUpMessage() + `\n\n⚖️ 完成度裁判反馈（需继续）: ${verdict.reason}`, ctx);
+				}, 500);
+				return;
+			}
+
+			// 裁判通过（或裁判不可用时 fail-open）→ 完成
 			state.active = false;
 			persistState(null); // 完成：删除持久化状态，不再恢复
 			ctx.ui.setWidget("loop", [
 				"✅ 目标已完成! 🎉",
 				`目标: ${state.goal}`,
-				`完成轮次: 第 ${finalIteration} 轮`,
+				`完成轮次: 第 ${finalIteration} 轮`,//
+				verdict?.verdict === "done" ? `⚖️ 裁判确认: ${verdict.reason || "通过"}` : "⚖️ 裁判不可用，按完成处理",
 			]);
 			setTimeout(() => {
 				if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
 			}, 5000);
-			ctx.ui.notify("✅ 目标完成! 🎉", "success");
+			ctx.ui.notify(
+				verdict?.verdict === "done" ? `✅ 目标完成（裁判确认）! 🎉` : `✅ 目标完成! 🎉`,
+				"success",
+			);
 			return;
 		}
 
@@ -798,16 +957,22 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- [LOOP_CONTINUE] → 继续下一轮 ---
+		// --- [LOOP_CONTINUE] → 继续下一轮（发送延迟到 agent_settled） ---
 		state.iteration++;
+		pendingSend = true;
 		persistState(state);
 		updateUI(ctx);
+	});
 
-		// 延迟发送，等待 agent 完全进入空闲状态
-		setTimeout(() => {
-			if (moduleDead || !state?.active || state.paused) return;
-			sendMessage(buildFollowUpMessage(), ctx);
-		}, 500);
+	// agent_settled：agent 完全空闲后发送续跑消息（比 agent_end 更稳）
+	pi.on("agent_settled", async (_e, ctx) => {
+		latestCtx = ctx;
+		if (moduleDead) return;
+		if (!state?.active || state.paused) return;
+		if (!pendingSend) return;
+		pendingSend = false;
+		debugLog("agent_settled 续跑 followUp");
+		sendMessage(buildFollowUpMessage(), ctx);
 	});
 }
 
@@ -815,8 +980,11 @@ export default function (pi: ExtensionAPI) {
 // 模块级：自动任务状态 + 工具函数
 // =========================================================================
 
+// 模块级状态（persistState 需要 pi 引用；autoTasks 从磁盘恢复）
 let autoTasks: AutoTask[] = loadTasksFromDisk();
 let moduleDead = false; // reload/卸载后置 true，阻止旧模块回调复活
+let piRef: ExtensionAPI | null = null;
+let pendingSend = false; // agent_end 后待发送的续跑消息（由 agent_settled 消费）
 
 function dayKey(d: Date): string {
 	return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
