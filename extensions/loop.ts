@@ -53,6 +53,7 @@ function persistState(s: LoopState | null): void {
 			startedAt: s.startedAt,
 			pausedMs: s.pausedMs ?? 0,
 			pausedAt: s.pausedAt ?? null,
+			judgeContinues: s.judgeContinues ?? 0,
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
 		// 分支持久化（pi 原生：跟随 fork/树导航/压缩），与文件双写
@@ -82,6 +83,7 @@ function loadStateFromBranch(ctx: ExtensionContext): LoopState | null {
 						startedAt: (d.startedAt as number) ?? Date.now(),
 						pausedMs: (d.pausedMs as number) ?? 0,
 						pausedAt: (d.pausedAt as number | null) ?? undefined,
+						judgeContinues: (d.judgeContinues as number) ?? 0,
 					};
 				}
 			}
@@ -108,6 +110,7 @@ function loadStateFromDisk(): LoopState | null {
 			startedAt: d.startedAt ?? Date.now(),
 			pausedMs: d.pausedMs ?? 0,
 			pausedAt: d.pausedAt ?? undefined,
+			judgeContinues: d.judgeContinues ?? 0,
 		};
 	} catch {
 		return null;
@@ -171,6 +174,7 @@ interface LoopState {
 	pausedAt?: number; // 进入暂停的时间戳，暂停期间时间冻结
 	pausedMs: number; // 累计暂停时长（ms），resume 时累加
 	pendingJudge?: boolean; // [LOOP_DONE] 后正在裁判验证，防止重复触发
+	judgeContinues?: number; // 连续被裁判驳回次数（达到上限转人工确认）
 }
 
 /**
@@ -190,6 +194,7 @@ interface AutoTask {
 }
 
 const DEFAULT_MAX_ITERATIONS = Infinity; // 默认无限循环，除非显式 max=N
+const JUDGE_MAX_CONTINUES = 3; // 裁判连续驳回上限：超过后强制转人工确认（防自指目标死循环）
 
 /** 轮次上限显示：有限时 "50"，无限时 "∞" */
 function maxLabel(m: number): string {
@@ -895,24 +900,46 @@ export default function (pi: ExtensionAPI) {
 			const verdict = await runJudge(ctx, state.goal, evidence);
 			state.pendingJudge = false;
 
-			if (verdict?.verdict === "continue") {
-				// 裁判判定未完成 → 继续循环并反馈差距
-				state.active = true;
-				state.paused = false;
-				state.iteration++; // 进入下一轮
-				persistState(state);
-				updateUI(ctx);
-				ctx.ui.notify(`⚖️ 裁判判定未完成，继续执行 — ${verdict.reason}`, "warning");
+		if (verdict?.verdict === "continue") {
+			state.judgeContinues = (state.judgeContinues ?? 0) + 1;
+			if (state.judgeContinues >= JUDGE_MAX_CONTINUES) {
+				// 连续被驳回达上限 → 强制结束，转人工确认（防自指目标死循环）
+				state.active = false;
+				persistState(null);
+				ctx.ui.setWidget("loop", [
+					"⚠️ 裁判多次未通过，已转人工确认",
+					`目标: ${truncateGoal(state.goal, 40)}`,
+					`连续驳回: ${state.judgeContinues} 次`,
+					"请人工判断目标是否真正完成（/loop 重新启动或放弃）",
+				]);
 				setTimeout(() => {
-					if (moduleDead || !state?.active || state.paused) return;
-					sendMessage(buildFollowUpMessage() + `\n\n⚖️ 完成度裁判反馈（需继续）: ${verdict.reason}`, ctx);
-				}, 500);
+					if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
+				}, 8000);
+				ctx.ui.notify(
+					`⚠️ 裁判连续 ${state.judgeContinues} 次未通过，已停止循环 — 请人工确认目标完成情况`,
+					"warning",
+				);
+				debugLog("裁判连续驳回达上限，强制停止转人工");
 				return;
 			}
+			// 裁判判定未完成 → 继续循环并反馈差距
+			state.active = true;
+			state.paused = false;
+			state.iteration++; // 进入下一轮
+			persistState(state);
+			updateUI(ctx);
+			ctx.ui.notify(`⚖️ 裁判判定未完成（${state.judgeContinues}/${JUDGE_MAX_CONTINUES}），继续执行 — ${verdict.reason}`, "warning");
+			setTimeout(() => {
+				if (moduleDead || !state?.active || state.paused) return;
+				sendMessage(buildFollowUpMessage() + `\n\n⚖️ 完成度裁判反馈（需继续，${state.judgeContinues}/${JUDGE_MAX_CONTINUES}）: ${verdict.reason}`, ctx);
+			}, 500);
+			return;
+		}
 
-			// 裁判通过（或裁判不可用时 fail-open）→ 完成
-			state.active = false;
-			persistState(null); // 完成：删除持久化状态，不再恢复
+		// 裁判通过（或裁判不可用时 fail-open）→ 完成
+		state.active = false;
+		state.judgeContinues = 0;
+		persistState(null); // 完成：删除持久化状态，不再恢复
 			ctx.ui.setWidget("loop", [
 				"✅ 目标已完成! 🎉",
 				`目标: ${state.goal}`,
