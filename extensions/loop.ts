@@ -139,7 +139,7 @@ export default function (pi: ExtensionAPI) {
 	// UI 更新
 	// -----------------------------------------------------------------------
 	function updateUI(ctx: ExtensionContext) {
-		if (!state || !state.active) {
+		if (!state) {
 			ctx.ui.setStatus("loop", undefined);
 			ctx.ui.setWidget("loop", undefined);
 			return;
@@ -149,6 +149,24 @@ export default function (pi: ExtensionAPI) {
 		const shortGoal = truncateGoal(state.goal, 30);
 		const widgetGoal = truncateGoal(state.goal, 40);
 		const elapsed = Date.now() - state.startedAt;
+
+		// --- 暂停中的循环：保留提示，方便 resume/stop ---
+		if (state.paused) {
+			ctx.ui.setStatus(
+				"loop",
+				ctx.ui.theme.fg(
+					"warning",
+					`⏸ 已暂停: ${shortGoal} [${formatElapsedShort(elapsed)}]`,
+				),
+			);
+			ctx.ui.setWidget("loop", [
+				"⏸ 循环已暂停（未结束）",
+				`⏱ 已运行 ${formatElapsed(elapsed)}`,
+				`目标: ${widgetGoal}`,
+				"▶️ /loop resume 继续 | 🛑 /loop stop 结束",
+			]);
+			return;
+		}
 
 		ctx.ui.setStatus(
 			"loop",
@@ -378,8 +396,8 @@ export default function (pi: ExtensionAPI) {
 
 	// 定时检查自动任务 + 刷新运行时间显示（1 秒）
 	setInterval(() => {
-		// 运行时间刷新
-		if (state?.active && latestCtx) {
+		// 运行时间刷新（运行中或暂停中都刷新）
+		if (state && latestCtx) {
 			updateUI(latestCtx);
 		}
 
