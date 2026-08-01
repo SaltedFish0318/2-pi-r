@@ -29,6 +29,7 @@ interface LoopState {
 	maxIterations: number;
 	active: boolean;
 	paused: boolean;
+	startedAt: number; // 循环开始时间戳（ms），用于显示已运行时长
 }
 
 /**
@@ -57,6 +58,27 @@ function maxLabel(m: number): string {
 /** 截断长目标文本（status 30 字符 / widget 40 字符） */
 function truncateGoal(s: string, limit: number): string {
 	return s.length > limit ? s.substring(0, limit - 1) + "…" : s;
+}
+
+/** 已运行时长：中文长格式（widget 用） */
+function formatElapsed(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h > 0) return `${h}小时${String(m).padStart(2, "0")}分`;
+	if (m > 0) return `${m}分${String(sec).padStart(2, "0")}秒`;
+	return `${sec}秒`;
+}
+
+/** 已运行时长：短格式（footer 用，如 12:34 / 1:02:34） */
+function formatElapsedShort(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+	return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
@@ -126,13 +148,13 @@ export default function (pi: ExtensionAPI) {
 		const prefix = state.paused ? "⏸" : "🔄";
 		const shortGoal = truncateGoal(state.goal, 30);
 		const widgetGoal = truncateGoal(state.goal, 40);
-		const maxL = maxLabel(state.maxIterations);
+		const elapsed = Date.now() - state.startedAt;
 
 		ctx.ui.setStatus(
 			"loop",
 			ctx.ui.theme.fg(
 				state.paused ? "warning" : "accent",
-				`${prefix} ${shortGoal} [${state.iteration}/${maxL}]`,
+				`${prefix} ${shortGoal} [${formatElapsedShort(elapsed)}]`,
 			),
 		);
 
@@ -142,16 +164,16 @@ export default function (pi: ExtensionAPI) {
 			const filled = Math.round((pct / 100) * barWidth);
 			ctx.ui.setWidget("loop", [
 				`${prefix} 循环进行中`,
+				`⏱ 已运行 ${formatElapsed(elapsed)}`,
 				`目标: ${widgetGoal}`,
 				`进度: ${"█".repeat(filled)}${"░".repeat(barWidth - filled)} ${pct}%`,
-				`轮次: ${state.iteration} / ${state.maxIterations}`,
 				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
 			]);
 		} else {
 			ctx.ui.setWidget("loop", [
 				`${prefix} 循环进行中`,
+				`⏱ 已运行 ${formatElapsed(elapsed)}`,
 				`目标: ${widgetGoal}`,
-				`轮次: 第 ${state.iteration} 轮（无限循环）`,
 				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
 			]);
 		}
@@ -288,11 +310,11 @@ export default function (pi: ExtensionAPI) {
 			if (input === "status") {
 				if (state) {
 					const status = state.active
-						? `🔄 第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮`
+						? `🔄 已运行 ${formatElapsed(Date.now() - state.startedAt)}`
 						: state.paused
-							? `⏸ 已暂停（第 ${state.iteration} 轮）`
+							? `⏸ 已暂停（已运行 ${formatElapsed(Date.now() - state.startedAt)}）`
 							: "已停止";
-					ctx.ui.notify(`${status} — 目标: "${state.goal}"`, "info");
+					ctx.ui.notify(`${status} — 目标: "${truncateGoal(state.goal, 50)}"`, "info");
 				} else {
 					ctx.ui.notify("当前没有循环", "info");
 				}
@@ -318,7 +340,9 @@ export default function (pi: ExtensionAPI) {
 				maxIterations,
 				active: true,
 				paused: false,
+				startedAt: Date.now(),
 			};
+			latestCtx = ctx; // 让 1s 定时刷新能更新运行时间
 
 			updateUI(ctx);
 			ctx.ui.notify(`🔄 循环开始: "${goal}"（${isFinite(maxIterations) ? `最多 ${maxIterations} 轮` : "无限循环"}）`, "info");
@@ -352,8 +376,13 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	// 定时检查自动任务
+	// 定时检查自动任务 + 刷新运行时间显示（1 秒）
 	setInterval(() => {
+		// 运行时间刷新
+		if (state?.active && latestCtx) {
+			updateUI(latestCtx);
+		}
+
 		if (autoTasks.length === 0) return;
 		const now = new Date();
 		const today = dayKey(now);
@@ -381,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		autoTasks = autoTasks.filter((t) => !t.fired || !!t.dailyTime);
-	}, 5000);
+	}, 1000);
 
 	function ctxForAuto(): ExtensionContext | undefined {
 		return latestCtx ?? undefined;
@@ -398,6 +427,7 @@ export default function (pi: ExtensionAPI) {
 			maxIterations: t.maxIterations,
 			active: true,
 			paused: false,
+			startedAt: Date.now(),
 		};
 		if (ctx) {
 			updateUI(ctx);
