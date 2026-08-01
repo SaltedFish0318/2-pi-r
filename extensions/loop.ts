@@ -30,6 +30,8 @@ interface LoopState {
 	active: boolean;
 	paused: boolean;
 	startedAt: number; // 循环开始时间戳（ms），用于显示已运行时长
+	pausedAt?: number; // 进入暂停的时间戳，暂停期间时间冻结
+	pausedMs: number; // 累计暂停时长（ms），resume 时累加
 }
 
 /**
@@ -58,6 +60,12 @@ function maxLabel(m: number): string {
 /** 截断长目标文本（status 30 字符 / widget 40 字符） */
 function truncateGoal(s: string, limit: number): string {
 	return s.length > limit ? s.substring(0, limit - 1) + "…" : s;
+}
+
+/** 已运行时长：扣除累计暂停时间；暂停期间冻结不再增长 */
+function elapsedOf(state: LoopState): number {
+	const base = state.pausedAt ?? Date.now();
+	return base - state.startedAt - (state.pausedMs ?? 0);
 }
 
 /** 已运行时长：中文长格式（widget 用） */
@@ -148,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 		const prefix = state.paused ? "⏸" : "🔄";
 		const shortGoal = truncateGoal(state.goal, 30);
 		const widgetGoal = truncateGoal(state.goal, 40);
-		const elapsed = Date.now() - state.startedAt;
+		const elapsed = elapsedOf(state);
 
 		// --- 暂停中的循环：保留提示，方便 resume/stop ---
 		if (state.paused) {
@@ -185,14 +193,14 @@ export default function (pi: ExtensionAPI) {
 				`⏱ 已运行 ${formatElapsed(elapsed)}`,
 				`目标: ${widgetGoal}`,
 				`进度: ${"█".repeat(filled)}${"░".repeat(barWidth - filled)} ${pct}%`,
-				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
+				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 暂停 | /loop stop 结束",
 			]);
 		} else {
 			ctx.ui.setWidget("loop", [
 				`${prefix} 循环进行中`,
 				`⏱ 已运行 ${formatElapsed(elapsed)}`,
 				`目标: ${widgetGoal}`,
-				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
+				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 暂停 | /loop stop 结束",
 			]);
 		}
 	}
@@ -300,6 +308,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				state.paused = true;
 				state.active = false;
+				state.pausedAt = Date.now();
 				updateUI(ctx);
 				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				return;
@@ -318,6 +327,10 @@ export default function (pi: ExtensionAPI) {
 
 				state.active = true;
 				state.paused = false;
+				if (state.pausedAt) {
+					state.pausedMs = (state.pausedMs ?? 0) + (Date.now() - state.pausedAt);
+					state.pausedAt = undefined;
+				}
 				updateUI(ctx);
 				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				sendMessage(buildFollowUpMessage(), ctx);
@@ -328,9 +341,9 @@ export default function (pi: ExtensionAPI) {
 			if (input === "status") {
 				if (state) {
 					const status = state.active
-						? `🔄 已运行 ${formatElapsed(Date.now() - state.startedAt)}`
+						? `🔄 已运行 ${formatElapsed(elapsedOf(state))}`
 						: state.paused
-							? `⏸ 已暂停（已运行 ${formatElapsed(Date.now() - state.startedAt)}）`
+							? `⏸ 已暂停（已运行 ${formatElapsed(elapsedOf(state))}）`
 							: "已停止";
 					ctx.ui.notify(`${status} — 目标: "${truncateGoal(state.goal, 50)}"`, "info");
 				} else {
@@ -359,6 +372,7 @@ export default function (pi: ExtensionAPI) {
 				active: true,
 				paused: false,
 				startedAt: Date.now(),
+				pausedMs: 0,
 			};
 			latestCtx = ctx; // 让 1s 定时刷新能更新运行时间
 
@@ -446,6 +460,7 @@ export default function (pi: ExtensionAPI) {
 			active: true,
 			paused: false,
 			startedAt: Date.now(),
+			pausedMs: 0,
 		};
 		if (ctx) {
 			updateUI(ctx);
@@ -552,6 +567,7 @@ export default function (pi: ExtensionAPI) {
 		if (userAborted) {
 			state.active = false;
 			state.paused = true;
+			state.pausedAt = Date.now();
 			updateUI(ctx);
 			ctx.ui.notify("⏸ 已暂停（你中止了本轮）— /loop resume 继续，/loop stop 结束", "info");
 			return;
