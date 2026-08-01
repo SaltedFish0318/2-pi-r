@@ -388,6 +388,18 @@ export default function (pi: ExtensionAPI) {
 
 	let latestCtx: ExtensionContext | null = null;
 
+	// reload/会话切换时清理残留 UI（状态已重置，UI 不能还挂着旧面板）
+	pi.on("session_shutdown", (_e, ctx) => {
+		ctx.ui.setWidget("loop", undefined);
+		ctx.ui.setStatus("loop", undefined);
+	});
+	pi.on("session_start", (e, ctx) => {
+		if (e.reason === "reload") {
+			ctx.ui.setWidget("loop", undefined);
+			ctx.ui.setStatus("loop", undefined);
+		}
+	});
+
 	// 从事件中持续更新最新 ctx（reload/会话切换后仍可用）
 	pi.on("before_agent_start", async (_e, ctx) => {
 		latestCtx = ctx;
