@@ -389,14 +389,21 @@ export default function (pi: ExtensionAPI) {
 	let latestCtx: ExtensionContext | null = null;
 
 	// reload/会话切换时清理残留 UI（状态已重置，UI 不能还挂着旧面板）
+	// 用 globalThis 标志跨模块实例传递"需要清理"信号（旧模块 shutdown 时设置）
 	pi.on("session_shutdown", (_e, ctx) => {
+		console.log("[loop] session_shutdown");
 		ctx.ui.setWidget("loop", undefined);
 		ctx.ui.setStatus("loop", undefined);
+		(globalThis as any).__loopStaleUI = true;
 	});
 	pi.on("session_start", (e, ctx) => {
-		if (e.reason === "reload") {
+		console.log("[loop] session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI);
+		const stale = (globalThis as any).__loopStaleUI === true;
+		if (stale || e.reason === "reload") {
+			(globalThis as any).__loopStaleUI = false;
 			ctx.ui.setWidget("loop", undefined);
 			ctx.ui.setStatus("loop", undefined);
+			console.log("[loop] 残留 UI 已清理");
 		}
 	});
 
@@ -422,6 +429,13 @@ export default function (pi: ExtensionAPI) {
 
 	// 定时检查自动任务 + 刷新运行时间显示（1 秒）
 	setInterval(() => {
+		// 兜底：若残留标志存在（reload 后事件链失效），主动清理
+		if ((globalThis as any).__loopStaleUI && latestCtx) {
+			(globalThis as any).__loopStaleUI = false;
+			ctxForAuto()?.ui.setWidget("loop", undefined);
+			ctxForAuto()?.ui.setStatus("loop", undefined);
+			console.log("[loop] interval 兜底清理残留 UI");
+		}
 		// 运行时间刷新（运行中或暂停中都刷新）
 		if (state && latestCtx) {
 			updateUI(latestCtx);
