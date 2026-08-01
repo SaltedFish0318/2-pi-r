@@ -410,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 			`你的目标是: "${state!.goal}"\n\n` +
 			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
 			"规则：\n" +
-			"1. **第一轮先起草完成契约**，输出格式：\n" +
+			"1. **目标判据判断**：如果目标的完成判据已明确（可客观验证），直接开始执行，无需契约；如果目标模糊或完成标准不明确，第一轮先起草完成契约：\n" +
 			"   [CONTRACT]\n" +
 			"   完成判据: （客观可验证的标准）\n" +
 			"   验证方法: （如何验证完成）\n" +
@@ -547,7 +547,7 @@ export default function (pi: ExtensionAPI) {
 				paused: false,
 				startedAt: Date.now(),
 				pausedMs: 0,
-				phase: "contract", // 先起草契约，用户确认后执行
+				phase: "executing", // 默认直接执行；AI 判断目标模糊时才走契约确认
 			};
 			persistState(state);
 			latestCtx = ctx; // 让 1s 定时刷新能更新运行时间
@@ -758,7 +758,7 @@ export default function (pi: ExtensionAPI) {
 			paused: false,
 			startedAt: Date.now(),
 			pausedMs: 0,
-			phase: "contract", // 自动触发也走契约确认
+			phase: "executing", // 默认直接执行；自动触发同样由 AI 判断是否走契约
 		};
 		persistState(state);
 		if (ctx) {
@@ -929,7 +929,7 @@ export default function (pi: ExtensionAPI) {
 		const { done, cont } = detectMarkers(lastText);
 
 		// --- 契约起草阶段：[CONTRACT_PENDING] → 暂停等待用户确认 ---
-		if (lastText.includes("[CONTRACT_PENDING]") && state.phase !== "executing") {
+		if (lastText.includes("[CONTRACT_PENDING]")) {
 			state.phase = "contract";
 			state.active = false;
 			state.paused = true;
