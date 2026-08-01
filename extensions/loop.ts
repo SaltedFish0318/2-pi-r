@@ -53,7 +53,7 @@ function persistState(s: LoopState | null): void {
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
 	} catch (err) {
-		debugLog("persistState 失败: " + (err as Error).message);
+		debugLog("persistState 失败: " + (err as Error).message + " @ " + STATE_FILE);
 	}
 }
 
@@ -493,12 +493,17 @@ export default function (pi: ExtensionAPI) {
 	// reload/会话切换时清理残留 UI（状态已重置，UI 不能还挂着旧面板）
 	// 用 globalThis 标志跨模块实例传递"需要清理"信号（旧模块 shutdown 时设置）
 	pi.on("session_shutdown", (_e, ctx) => {
-		debugLog("session_shutdown");
+		debugLog("session_shutdown reason=" + _e.reason);
 		moduleDead = true;
 		// 关键：杀掉本模块的定时器，否则 reload 后旧 interval 会把面板重新画回来
 		if (loopTimer) {
 			clearInterval(loopTimer);
 			loopTimer = undefined;
+		}
+		// 兜底：quit/reload 前最后一次落盘（防止状态丢失）
+		if (state) {
+			persistState(state);
+			debugLog("shutdown 兜底持久化: active=" + state.active + " paused=" + state.paused);
 		}
 		ctx.ui.setWidget("loop", undefined);
 		ctx.ui.setStatus("loop", undefined);
@@ -517,6 +522,7 @@ export default function (pi: ExtensionAPI) {
 
 		// --- 恢复持久化的循环 ---
 		if (state?.paused) {
+			persistState(state); // 恢复后立即重写，确保文件存在
 			// 暂停中的循环：显示暂停面板，等待用户 resume
 			updateUI(ctx);
 			ctx.ui.notify(
@@ -524,6 +530,7 @@ export default function (pi: ExtensionAPI) {
 				"info",
 			);
 		} else if (state?.active) {
+			persistState(state); // 恢复后立即重写，确保文件存在
 			// 运行中的循环：恢复面板 + 自动续跑
 			updateUI(ctx);
 			ctx.ui.notify(`♻️ 已恢复循环: "${truncateGoal(state.goal, 30)}"`, "info");
