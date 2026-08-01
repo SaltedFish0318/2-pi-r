@@ -1,53 +1,32 @@
 ---
-description: 把普通任务转成严格的完成契约（完成判据/验证/约束）
+description: 把模糊任务转成严格的 loop 完成契约（供 /loop 使用）
 argument-hint: "<任务>"
 ---
 
----
-description: Convert a plain task into a strict evidence-based pi-codex goal and create it
-argument-hint: "<task>"
----
-
-User task:
+用户任务：
 $@
 
-Turn the user task into exactly one durable pi-codex-goal objective, then call the goal creation tool with that objective.
+请把上述任务转成一份**严格的完成契约**，供 pi 的 `/loop` 循环模式使用。输出格式：
 
-This prompt invocation is an explicit user request to set a new goal. When the goal creation tool exposes `replace_existing`, pass `replace_existing: true` so an existing active, paused, or budget-limited goal is replaced instead of requiring `/goal clear` first.
+[CONTRACT]
+完成判据: （客观可验证的标准——完成时什么必须为真）
+验证方法: （如何验证——具体命令/测试/检查项）
+关键约束: （不能违反的限制——保留现有行为、不引入未批准捷径等）
+[/CONTRACT]
 
-Do not set a token budget limit unless the user explicitly provides a budget/limit in the task. If no explicit budget is provided, omit the token budget field entirely.
+契约写作要求：
 
-The goal must be a completion contract, not a task summary. Preserve the user's full intent. Do not weaken broad acceptance criteria such as "all", "any", "complete", "no tech debt", "do it right", "fully", or "hard acceptance criteria".
+1. **完成判据**：必须是客观可验证的，不能是"大概完成""差不多"这类模糊表述。保留用户的完整意图（如"全部""任何""彻底"等硬性验收词不得弱化）。
+2. **验证方法**：给出具体验证手段——测试、lint、类型检查、构建、diff、生成物检查等；如项目有本地 CI/验证命令，必须包含。
+3. **关键约束**：保留现有行为（除非任务明确要求改变）、不丢弃用户已有改动、不留 TODO 占位/死代码/隐藏假设。
+4. **迭代策略**：每轮尝试后检查证据、更新计划、继续下一步；验证失败要修复根因而非报告部分完成。
+5. **完成审计**：标记完成前，把契约中每个明确要求映射到具体证据（文件/命令输出/测试/产物）。
+6. **阻塞停止**：若当前权限/工具/预算下无法完成，不要标记完成——报告已尝试路径、证据、确切阻塞点和所需输入。
 
-The goal must require:
+产出契约后，**不要执行任务**，直接提示用户：
 
-1. Outcome
-   - State what must be true when complete.
-   - Preserve the full requested end state.
-   - Do not narrow scope after the fact unless the original user task explicitly defined that scope.
+> 📋 契约已生成。请用以下命令启动循环：
+> `/loop <原始任务描述>`
+> （AI 起草契约时会参考此契约；如需强制使用本契约，可在启动后回复"按这个契约执行"）
 
-2. Verification evidence
-   - Name the concrete evidence required before completion.
-   - Include relevant tests, lint, type checks, builds, smoke checks, diffs, docs, generated outputs, rendered UI inspection, or artifact checks when applicable.
-   - If the repo has an existing local CI/validation command, require it unless clearly irrelevant.
-
-3. Constraints
-   - Preserve existing behavior unless the task explicitly changes it.
-   - Do not discard user changes.
-   - Do not leave unapproved shortcuts, compatibility shims, TODO placeholders, dead code, duplicated logic, hidden assumptions, or undocumented behavior changes.
-
-4. Iteration policy
-   - After each attempt, inspect evidence, update the plan, and keep taking the next low-risk useful step.
-   - Do not stop at a plan when implementation or verification remains.
-   - If validation fails, triage and fix the cause rather than reporting partial completion.
-
-5. Completion audit
-   - Before marking the goal complete, map every explicit requirement in the goal to fresh evidence from files, commands, diffs, tests, screenshots, artifacts, or logs.
-   - The goal is not complete if any requirement is unverified, narrowed, deferred, or only probably satisfied.
-   - Phrases like "for the scope this is complete", "good enough", "out of scope", or "remaining tech debt" are not valid completion evidence unless the original user task explicitly allowed that limitation.
-
-6. Blocked stop condition
-   - If completion is impossible with current access, tools, budget, or missing decisions, stop without marking complete.
-   - Report attempted paths, evidence gathered, exact blockers, remaining unmet requirements, and what input would unblock progress.
-
-Use concise imperative language in the goal. If the task is blank or only whitespace, infer the goal based on the conversation context or ask the user to clarify.
+如果任务本身完成判据已明确（可客观验证、无需澄清），说明"该任务判据清晰，直接 /loop 启动即可，无需契约"。

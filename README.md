@@ -147,6 +147,14 @@ Host github.com
 /permission        # 选择模式，自动写入 ~/.pi/agent/permissions.json
 ```
 
+## 📋 /create-goal prompt 模板
+
+把模糊任务转成严格的 loop 完成契约（借鉴 codex-goal 的契约写法）——**loop 的契约预处理器**：
+
+
+
+与 /loop 的关系：loop 负责执行闭环（契约确认→执行→裁判验证）；create-goal 负责把模糊需求变成高质量契约输入。
+
 ## 🛠️ 开发
 
 ```bash
