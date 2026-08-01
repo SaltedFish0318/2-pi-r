@@ -1,8 +1,12 @@
 /**
- * Loop Mode Extension v3
+ * Loop Mode Extension v4
  *
  * Continuously iterates on a goal until completion, similar to
  * Claude Code's /loop and Codex's goal mode.
+ *
+ * 持久化：目标在完成或主动停止前保持持久，/reload 或重启 pi 后自动恢复。
+ *   - 运行中 → 恢复后自动续跑
+ *   - 暂停中 → 恢复暂停面板，/loop resume 继续
  *
  * Usage:
  *   /loop <goal>           — Start loop（如：/loop 帮我学英语）
@@ -14,20 +18,90 @@
  *
  * AI 回复末尾用 [LOOP_CONTINUE] 表示需要继续，
  * 用 [LOOP_DONE] 表示目标已完成。
- * 按 Escape 可随时中止。
+ * 按 Escape 可随时中止（暂停）。
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-// =========================================================================
-// 调试日志（写入文件，reload 后可用于排查事件是否触发）
-// =========================================================================
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-const LOG_FILE = path.join(os.homedir(), ".pi", "agent", "loop-debug.log");
+// =========================================================================
+// 持久化：状态写入 ~/.pi/agent/，重启/reload 后自动恢复
+// =========================================================================
+
+const STATE_FILE = path.join(os.homedir(), ".pi", "agent", "loop-state.json");
+const TASKS_FILE = path.join(os.homedir(), ".pi", "agent", "loop-tasks.json");
+
+/** 保存循环状态（null 表示已结束/停止，删除文件） */
+function persistState(s: LoopState | null): void {
+	try {
+		if (!s) {
+			fs.rmSync(STATE_FILE, { force: true });
+			return;
+		}
+		const out = {
+			goal: s.goal,
+			iteration: s.iteration,
+			maxIterations: isFinite(s.maxIterations) ? s.maxIterations : null, // JSON 不支持 Infinity
+			active: s.active,
+			paused: s.paused,
+			startedAt: s.startedAt,
+			pausedMs: s.pausedMs ?? 0,
+			pausedAt: s.pausedAt ?? null,
+		};
+		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
+	} catch (err) {
+		debugLog("persistState 失败: " + (err as Error).message);
+	}
+}
+
+/** 从磁盘恢复循环状态（未完成未停止时返回，否则 null） */
+function loadStateFromDisk(): LoopState | null {
+	try {
+		const raw = fs.readFileSync(STATE_FILE, "utf-8");
+		const d = JSON.parse(raw);
+		if (!d || typeof d.goal !== "string" || !d.goal) return null;
+		if (!d.active && !d.paused) return null; // 已结束/停止的循环不恢复
+		return {
+			goal: d.goal,
+			iteration: d.iteration ?? 1,
+			maxIterations: d.maxIterations === null ? Infinity : (d.maxIterations ?? Infinity),
+			active: !!d.active,
+			paused: !!d.paused,
+			startedAt: d.startedAt ?? Date.now(),
+			pausedMs: d.pausedMs ?? 0,
+			pausedAt: d.pausedAt ?? undefined,
+		};
+	} catch {
+		return null;
+	}
+}
+
+/** 保存自动任务列表 */
+function persistTasks(tasks: AutoTask[]): void {
+	try {
+		fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks));
+	} catch {
+		// 忽略
+	}
+}
+
+/** 从磁盘恢复自动任务列表 */
+function loadTasksFromDisk(): AutoTask[] {
+	try {
+		const raw = fs.readFileSync(TASKS_FILE, "utf-8");
+		const arr = JSON.parse(raw);
+		return Array.isArray(arr) ? arr : [];
+	} catch {
+		return [];
+	}
+}
+
+// =========================================================================
+// 调试日志（写入文件，reload 后可用于排查事件是否触发）
+// =========================================================================
 function debugLog(msg: string): void {
 	try {
 		fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
@@ -159,7 +233,11 @@ function getLastAssistantText(entries: any[]): string {
 // =========================================================================
 
 export default function (pi: ExtensionAPI) {
-	let state: LoopState | null = null;
+	// 启动/重载时从磁盘恢复持久化状态
+	let state: LoopState | null = loadStateFromDisk();
+	if (state) {
+		debugLog("恢复持久化状态: goal=" + state.goal.slice(0, 40) + " active=" + state.active + " paused=" + state.paused + " iter=" + state.iteration);
+	}
 
 	// -----------------------------------------------------------------------
 	// UI 更新
@@ -307,6 +385,7 @@ export default function (pi: ExtensionAPI) {
 				if (state) {
 					const wasActive = state.active;
 					state = null;
+					persistState(null); // 主动停止：删除持久化状态
 					updateUI(ctx);
 					ctx.ui.notify(wasActive ? "🛑 循环已停止" : "没有活跃的循环", "info");
 				} else {
@@ -328,6 +407,7 @@ export default function (pi: ExtensionAPI) {
 				state.paused = true;
 				state.active = false;
 				state.pausedAt = Date.now();
+				persistState(state);
 				updateUI(ctx);
 				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				return;
@@ -350,6 +430,7 @@ export default function (pi: ExtensionAPI) {
 					state.pausedMs = (state.pausedMs ?? 0) + (Date.now() - state.pausedAt);
 					state.pausedAt = undefined;
 				}
+				persistState(state);
 				updateUI(ctx);
 				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				sendMessage(buildFollowUpMessage(), ctx);
@@ -393,6 +474,7 @@ export default function (pi: ExtensionAPI) {
 				startedAt: Date.now(),
 				pausedMs: 0,
 			};
+			persistState(state);
 			latestCtx = ctx; // 让 1s 定时刷新能更新运行时间
 
 			updateUI(ctx);
@@ -423,13 +505,34 @@ export default function (pi: ExtensionAPI) {
 		(globalThis as any).__loopStaleUI = true;
 	});
 	pi.on("session_start", (e, ctx) => {
-		debugLog("session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI);
+		debugLog("session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI + " restored=" + !!state);
 		const stale = (globalThis as any).__loopStaleUI === true;
-		if (stale || e.reason === "reload") {
+		if (stale) {
 			(globalThis as any).__loopStaleUI = false;
 			ctx.ui.setWidget("loop", undefined);
 			ctx.ui.setStatus("loop", undefined);
 			debugLog("残留 UI 已清理");
+		}
+		latestCtx = ctx;
+
+		// --- 恢复持久化的循环 ---
+		if (state?.paused) {
+			// 暂停中的循环：显示暂停面板，等待用户 resume
+			updateUI(ctx);
+			ctx.ui.notify(
+				`♻️ 已恢复暂停中的循环: "${truncateGoal(state.goal, 30)}" — /loop resume 继续，/loop stop 结束`,
+				"info",
+			);
+		} else if (state?.active) {
+			// 运行中的循环：恢复面板 + 自动续跑
+			updateUI(ctx);
+			ctx.ui.notify(`♻️ 已恢复循环: "${truncateGoal(state.goal, 30)}"`, "info");
+			// 延迟发送，等待 agent 空闲
+			setTimeout(() => {
+				if (moduleDead || !state?.active || state.paused) return;
+				debugLog("恢复后自动续跑 followUp");
+				sendMessage(buildFollowUpMessage(), ctx);
+			}, 800);
 		}
 	});
 
@@ -495,6 +598,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		autoTasks = autoTasks.filter((t) => !t.fired || !!t.dailyTime);
+		persistTasks(autoTasks);
 	}, 1000);
 
 	function ctxForAuto(): ExtensionContext | undefined {
@@ -515,6 +619,7 @@ export default function (pi: ExtensionAPI) {
 			startedAt: Date.now(),
 			pausedMs: 0,
 		};
+		persistState(state);
 		if (ctx) {
 			updateUI(ctx);
 			ctx.ui.notify(`⚡ 自动触发循环: "${t.goal}"`, "info");
@@ -570,6 +675,7 @@ export default function (pi: ExtensionAPI) {
 				fired: false,
 			};
 			autoTasks.push(task);
+			persistTasks(autoTasks);
 			latestCtx = ctx;
 			ctx.ui.notify(`⏰ 已安排: ${task.description} → "${task.goal}" [${task.id}]`, "info");
 			return;
@@ -589,6 +695,7 @@ export default function (pi: ExtensionAPI) {
 				fired: false,
 			};
 			autoTasks.push(task);
+			persistTasks(autoTasks);
 			latestCtx = ctx;
 			ctx.ui.notify(`⏰ 已安排: ${task.description} → "${task.goal}" [${task.id}]`, "info");
 			return;
@@ -631,6 +738,7 @@ export default function (pi: ExtensionAPI) {
 		if (done) {
 			const finalIteration = state.iteration;
 			state.active = false;
+			persistState(null); // 完成：删除持久化状态，不再恢复
 			ctx.ui.setWidget("loop", [
 				"✅ 目标已完成! 🎉",
 				`目标: ${state.goal}`,
@@ -670,6 +778,7 @@ export default function (pi: ExtensionAPI) {
 
 		// --- [LOOP_CONTINUE] → 继续下一轮 ---
 		state.iteration++;
+		persistState(state);
 		updateUI(ctx);
 
 		// 延迟发送，等待 agent 完全进入空闲状态
@@ -684,7 +793,7 @@ export default function (pi: ExtensionAPI) {
 // 模块级：自动任务状态 + 工具函数
 // =========================================================================
 
-let autoTasks: AutoTask[] = [];
+let autoTasks: AutoTask[] = loadTasksFromDisk();
 let moduleDead = false; // reload/卸载后置 true，阻止旧模块回调复活
 
 function dayKey(d: Date): string {
