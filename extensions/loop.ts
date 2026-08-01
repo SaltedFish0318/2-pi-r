@@ -32,22 +32,18 @@ interface LoopState {
 }
 
 /**
- * 自动触发任务：到时间/条件满足时自动启动循环，无需手动 /loop。
+ * 自动触发任务：到时间自动启动循环，无需手动 /loop。
  */
 interface AutoTask {
 	id: string;
-	kind: "time" | "gold";
+	kind: "time";
 	goal: string;
 	maxIterations: number;
 	description: string;
-	// time 类型：
 	delayMs?: number; // 一次性：N 毫秒后触发
 	createdAt: number;
 	dailyTime?: string; // 每日："HH:MM" 触发
 	lastFiredDay?: string; // 每日任务当天已触发标记 "YYYY-MM-DD"
-	// gold 类型：
-	goldDir?: "below" | "above";
-	goldPrice?: number;
 	fired: boolean;
 }
 
@@ -215,8 +211,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// --- schedule/watch/auto: 自动触发任务 ---
-			if (input.startsWith("schedule ") || input.startsWith("watch ") || input === "auto" || input.startsWith("auto ")) {
+			// --- schedule/auto: 自动触发任务 ---
+			if (input.startsWith("schedule ") || input === "auto" || input.startsWith("auto ")) {
 				handleAutoCommand(input, ctx);
 				return;
 			}
@@ -358,17 +354,6 @@ export default function (pi: ExtensionAPI) {
 					hit = curMin >= h * 60 + m;
 				}
 				if (hit && t.dailyTime) t.lastFiredDay = today;
-			} else if (t.kind === "gold") {
-				// 金价条件：异步拉取，命中即触发（一次性）
-				fetchXAU().then((price) => {
-					if (price === null || t.fired || state?.active) return;
-					const ok = t.goldDir === "below" ? price < t.goldPrice! : price > t.goldPrice!;
-					if (ok) {
-						t.fired = true;
-						startAutoLoop(t, ctxForAuto());
-					}
-				});
-				continue;
 			}
 
 			if (hit) {
@@ -414,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 		// --- auto list ---
 		if (input === "auto" || input === "auto list") {
 			if (autoTasks.length === 0) {
-				ctx.ui.notify("没有自动任务。用 /loop schedule / /loop watch 添加", "info");
+				ctx.ui.notify("没有自动任务。用 /loop schedule 添加", "info");
 				return;
 			}
 			const lines = autoTasks.map((t) => `[${t.id}] ${t.description} ${t.fired ? "(已触发)" : "(待触发)"}`);
@@ -475,32 +460,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- watch gold below=4000 <goal> ---
-		m = input.match(/^watch\s+gold\s+(below|above)=(\d+(?:\.\d+)?)\s+(.+)$/);
-		if (m) {
-			const task: AutoTask = {
-				id: "g" + (autoTasks.length + 1) + "-" + Date.now().toString(36).slice(-4),
-				kind: "gold",
-				goal: m[3]!.trim(),
-				maxIterations: DEFAULT_MAX_ITERATIONS,
-				description: `伦敦金 ${m[1] === "below" ? "跌破" : "涨破"} ${m[2]} 自动开始`,
-				goldDir: m[1] as "below" | "above",
-				goldPrice: parseFloat(m[2]!),
-				createdAt: Date.now(),
-				fired: false,
-			};
-			autoTasks.push(task);
-			latestCtx = ctx;
-			ctx.ui.notify(`👀 已盯盘: ${task.description} → "${task.goal}" [${task.id}]`, "info");
-			return;
-		}
-
 		ctx.ui.notify(
 			"用法:\n" +
 				"/loop schedule in=30m <目标> — 30分钟后自动开始\n" +
 				"/loop schedule 09:30 <目标> — 每天09:30自动开始\n" +
-				"/loop watch gold below=4000 <目标> — 金价跌破4000自动开始\n" +
-				"/loop watch gold above=4120 <目标> — 金价涨破4120自动开始\n" +
 				"/loop auto list — 查看任务\n" +
 				"/loop auto cancel <id> — 取消任务",
 			"info",
@@ -581,21 +544,3 @@ function dayKey(d: Date): string {
 	return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
-/** 拉取伦敦金最新价（新浪行情，GBK 编码） */
-async function fetchXAU(): Promise<number | null> {
-	try {
-		const res = await fetch("https://hq.sinajs.cn/list=hf_XAU", {
-			headers: { Referer: "https://finance.sina.com.cn" },
-		});
-		if (!res.ok) return null;
-		const buf = new Uint8Array(await res.arrayBuffer());
-		const text = new TextDecoder("gbk").decode(buf);
-		const m = text.match(/hf_XAU="([^"]+)"/);
-		if (!m) return null;
-		const fields = m[1]!.split(",");
-		const price = parseFloat(fields[0]!);
-		return isNaN(price) ? null : price;
-	} catch {
-		return null;
-	}
-}
