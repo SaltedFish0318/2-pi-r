@@ -34,6 +34,7 @@ import * as os from "node:os";
 
 const STATE_FILE = path.join(os.homedir(), ".pi", "agent", "loop-state.json");
 const TASKS_FILE = path.join(os.homedir(), ".pi", "agent", "loop-tasks.json");
+const EXT_DIR_LOOP = path.dirname(new URL(import.meta.url).pathname.replace(/^\//, ""));
 
 /** 保存循环状态（null 表示已结束/停止，删除文件） */
 function persistState(s: LoopState | null): void {
@@ -54,6 +55,7 @@ function persistState(s: LoopState | null): void {
 			pausedMs: s.pausedMs ?? 0,
 			pausedAt: s.pausedAt ?? null,
 			judgeContinues: s.judgeContinues ?? 0,
+			phase: s.phase ?? "executing",
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
 		// 分支持久化（pi 原生：跟随 fork/树导航/压缩），与文件双写
@@ -84,6 +86,7 @@ function loadStateFromBranch(ctx: ExtensionContext): LoopState | null {
 						pausedMs: (d.pausedMs as number) ?? 0,
 						pausedAt: (d.pausedAt as number | null) ?? undefined,
 						judgeContinues: (d.judgeContinues as number) ?? 0,
+						phase: (d.phase as "contract" | "executing") ?? "executing",
 					};
 				}
 			}
@@ -111,6 +114,7 @@ function loadStateFromDisk(): LoopState | null {
 			pausedMs: d.pausedMs ?? 0,
 			pausedAt: d.pausedAt ?? undefined,
 			judgeContinues: d.judgeContinues ?? 0,
+			phase: (d.phase as "contract" | "executing") ?? "executing",
 		};
 	} catch {
 		return null;
@@ -175,6 +179,7 @@ interface LoopState {
 	pausedMs: number; // 累计暂停时长（ms），resume 时累加
 	pendingJudge?: boolean; // [LOOP_DONE] 后正在裁判验证，防止重复触发
 	judgeContinues?: number; // 连续被裁判驳回次数（达到上限转人工确认）
+	phase?: "contract" | "executing"; // contract=起草契约待确认；executing=执行中
 }
 
 /**
@@ -395,7 +400,8 @@ export default function (pi: ExtensionAPI) {
 		return (
 			`继续完成目标: "${state!.goal}"\n` +
 			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
-			`完成后请用 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记。`
+			`完成后请用 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记。\n` +
+			"（声明 [LOOP_DONE] 时必须附 [EVIDENCE] 证据清单：具体文件/命令输出/测试结果）"
 		);
 	}
 
@@ -404,9 +410,20 @@ export default function (pi: ExtensionAPI) {
 			`你的目标是: "${state!.goal}"\n\n` +
 			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
 			"规则：\n" +
-			"1. 每轮结束后，用 [LOOP_CONTINUE] 表示还需要继续。\n" +
-			"2. 如果目标已完成，用 [LOOP_DONE] 表示。\n" +
-			"3. 每轮都要有实质进展。"
+			"1. **第一轮先起草完成契约**，输出格式：\n" +
+			"   [CONTRACT]\n" +
+			"   完成判据: （客观可验证的标准）\n" +
+			"   验证方法: （如何验证完成）\n" +
+			"   关键约束: （不能违反的限制）\n" +
+			"   [/CONTRACT]\n" +
+			"   末尾用 [CONTRACT_PENDING] 标记，等待用户确认后再执行。\n" +
+			"2. 用户确认（回复\"开始执行\"）后，从下一轮开始执行目标。\n" +
+			"3. 每轮结束后，用 [LOOP_CONTINUE] 表示还需要继续。\n" +
+			"4. 声明 [LOOP_DONE] 前，**必须附证据清单**：\n" +
+			"   [EVIDENCE]\n" +
+			"   - 具体文件路径 / 命令输出 / 测试结果\n" +
+			"   [/EVIDENCE]\n" +
+			"5. 每轮都要有实质进展。"
 		);
 	}
 
@@ -484,6 +501,8 @@ export default function (pi: ExtensionAPI) {
 					state.pausedMs = (state.pausedMs ?? 0) + (Date.now() - state.pausedAt);
 					state.pausedAt = undefined;
 				}
+				// resume 时契约阶段直接进入执行
+				if (state.phase === "contract") state.phase = "executing";
 				pendingSend = false;
 				persistState(state);
 				updateUI(ctx);
@@ -528,6 +547,7 @@ export default function (pi: ExtensionAPI) {
 				paused: false,
 				startedAt: Date.now(),
 				pausedMs: 0,
+				phase: "contract", // 先起草契约，用户确认后执行
 			};
 			persistState(state);
 			latestCtx = ctx; // 让 1s 定时刷新能更新运行时间
@@ -536,6 +556,38 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`🔄 循环开始: "${goal}"（${isFinite(maxIterations) ? `最多 ${maxIterations} 轮` : "无限循环"}）`, "info");
 			sendMessage(buildInitialMessage(), ctx);
 		},
+	});
+
+	// =======================================================================
+	// 契约确认（用户回复"开始执行"时进入执行阶段）
+	// =======================================================================
+	pi.on("input", (event, ctx) => {
+		if (!state?.paused || state.phase !== "contract") return undefined;
+		const text = (event.text ?? "").trim();
+		if (/^(开始执行|确认|开始|approve)/i.test(text)) {
+			state.phase = "executing";
+			state.active = true;
+			state.paused = false;
+			state.pausedAt = undefined;
+			persistState(state);
+			updateUI(ctx);
+			ctx.ui.notify("✅ 契约已确认，开始执行", "success");
+			debugLog("契约确认，进入执行阶段");
+			setTimeout(() => {
+				if (moduleDead || !state?.active || state.paused) return;
+				sendMessage(buildFollowUpMessage() + "\n\n用户已确认完成契约，开始执行目标。", ctx);
+			}, 300);
+			return { action: "handled" }; // 消费输入，不交给 agent
+		}
+		return undefined;
+	});
+
+	// =======================================================================
+	// 资源发现：注册 /create-goal prompt 模板
+	// =======================================================================
+	pi.on("resources_discover", () => {
+		const promptsDir = path.join(EXT_DIR_LOOP, "..", "prompts");
+		return { promptPaths: [promptsDir] };
 	});
 
 	// =======================================================================
@@ -706,6 +758,7 @@ export default function (pi: ExtensionAPI) {
 			paused: false,
 			startedAt: Date.now(),
 			pausedMs: 0,
+			phase: "contract", // 自动触发也走契约确认
 		};
 		persistState(state);
 		if (ctx) {
@@ -825,14 +878,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** 调用 LLM 裁判（当前模型，fresh context） */
-	async function runJudge(ctx: ExtensionContext, goal: string, evidence: string): Promise<{ verdict: "done" | "continue"; reason: string } | null> {
+	async function runJudge(ctx: ExtensionContext, goal: string, evidence: string, aiEvidence?: string): Promise<{ verdict: "done" | "continue"; reason: string } | null> {
 		try {
 			if (!ctx.model) return null;
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 			if (!auth.ok || !auth.apiKey) return null;
 			const userMessage: UserMessage = {
 				role: "user",
-				content: [{ type: "text", text: `目标: ${goal}\n\n完成声明: AI 报告 [LOOP_DONE]\n\n最近进展证据:\n${evidence}` }],
+				content: [{ type: "text", text: `目标: ${goal}\n\n完成声明: AI 报告 [LOOP_DONE]\n\nAI 声称的证据清单:\n${aiEvidence || "（未提供）"}\n\n最近进展证据（对话记录）:\n${evidence}` }],
 				timestamp: Date.now(),
 			};
 			const resp = await complete(
@@ -875,6 +928,17 @@ export default function (pi: ExtensionAPI) {
 		const lastText = getLastAssistantText(ctx.sessionManager.getEntries());
 		const { done, cont } = detectMarkers(lastText);
 
+		// --- 契约起草阶段：[CONTRACT_PENDING] → 暂停等待用户确认 ---
+		if (lastText.includes("[CONTRACT_PENDING]") && state.phase !== "executing") {
+			state.phase = "contract";
+			state.active = false;
+			state.paused = true;
+			state.pausedAt = Date.now();
+			persistState(state);
+			updateUI(ctx);
+			ctx.ui.notify("📝 完成契约已起草 — 回复「开始执行」确认后运行，或 /loop stop 取消", "info");
+			return;
+		}
 		// --- 用户主动中止（ESC / abort）→ 安静暂停，不弹"未找到标记"警告 ---
 		const userAborted = ctx.signal?.aborted === true || lastText.trim().length === 0;
 		if (userAborted) {
@@ -891,13 +955,17 @@ export default function (pi: ExtensionAPI) {
 		if (done) {
 			if (state.pendingJudge) return; // 裁判中，防重复
 
+			// 提取 AI 声明的证据清单 [EVIDENCE]
+			const evidenceMatch = lastText.match(/\[EVIDENCE\]([\s\S]*?)\[\/EVIDENCE\]/);
+			const aiEvidence = evidenceMatch?.[1]?.trim() ?? "";
+
 			const finalIteration = state.iteration;
 			// 裁判验证：防 AI 假完成
 			state.pendingJudge = true;
 			persistState(state);
 			ctx.ui.notify("🔍 完成度裁判验证中...", "info");
 			const evidence = getRecentEvidence(ctx);
-			const verdict = await runJudge(ctx, state.goal, evidence);
+			const verdict = await runJudge(ctx, state.goal, evidence, aiEvidence);
 			state.pendingJudge = false;
 
 		if (verdict?.verdict === "continue") {
