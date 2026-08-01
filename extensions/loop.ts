@@ -387,11 +387,18 @@ export default function (pi: ExtensionAPI) {
 	// =======================================================================
 
 	let latestCtx: ExtensionContext | null = null;
+	let loopTimer: ReturnType<typeof setInterval> | undefined;
 
 	// reload/会话切换时清理残留 UI（状态已重置，UI 不能还挂着旧面板）
 	// 用 globalThis 标志跨模块实例传递"需要清理"信号（旧模块 shutdown 时设置）
 	pi.on("session_shutdown", (_e, ctx) => {
 		console.log("[loop] session_shutdown");
+		moduleDead = true;
+		// 关键：杀掉本模块的定时器，否则 reload 后旧 interval 会把面板重新画回来
+		if (loopTimer) {
+			clearInterval(loopTimer);
+			loopTimer = undefined;
+		}
 		ctx.ui.setWidget("loop", undefined);
 		ctx.ui.setStatus("loop", undefined);
 		(globalThis as any).__loopStaleUI = true;
@@ -428,7 +435,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// 定时检查自动任务 + 刷新运行时间显示（1 秒）
-	setInterval(() => {
+	loopTimer = setInterval(() => {
+		if (moduleDead) return;
 		// 兜底：若残留标志存在（reload 后事件链失效），主动清理
 		if ((globalThis as any).__loopStaleUI && latestCtx) {
 			(globalThis as any).__loopStaleUI = false;
@@ -646,7 +654,7 @@ export default function (pi: ExtensionAPI) {
 
 		// 延迟发送，等待 agent 完全进入空闲状态
 		setTimeout(() => {
-			if (!state?.active || state.paused) return;
+			if (moduleDead || !state?.active || state.paused) return;
 			sendMessage(buildFollowUpMessage(), ctx);
 		}, 500);
 	});
@@ -657,6 +665,7 @@ export default function (pi: ExtensionAPI) {
 // =========================================================================
 
 let autoTasks: AutoTask[] = [];
+let moduleDead = false; // reload/卸载后置 true，阻止旧模块回调复活
 
 function dayKey(d: Date): string {
 	return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
