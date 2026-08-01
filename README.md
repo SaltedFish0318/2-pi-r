@@ -36,8 +36,8 @@ node scripts/build-native.mjs --platform windows
 让 AI 持续迭代工作直到目标完成。
 
 ```
-/loop <目标>            # 开始循环
-/loop max=100 <目标>    # 自定义最大轮数（默认 50，上限 200）
+/loop <目标>            # 开始循环（默认无限轮次）
+/loop max=100 <目标>    # 显式限定轮数（上限 200）
 /loop pause             # 暂停（保留进度）
 /loop resume            # 恢复
 /loop stop              # 停止

@@ -47,7 +47,17 @@ interface AutoTask {
 	fired: boolean;
 }
 
-const DEFAULT_MAX_ITERATIONS = 50;
+const DEFAULT_MAX_ITERATIONS = Infinity; // 默认无限循环，除非显式 max=N
+
+/** 轮次上限显示：有限时 "50"，无限时 "∞" */
+function maxLabel(m: number): string {
+	return isFinite(m) ? String(m) : "∞";
+}
+
+/** 截断长目标文本（status 30 字符 / widget 40 字符） */
+function truncateGoal(s: string, limit: number): string {
+	return s.length > limit ? s.substring(0, limit - 1) + "…" : s;
+}
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 
@@ -114,29 +124,37 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const prefix = state.paused ? "⏸" : "🔄";
-		const shortGoal = state.goal.length > 30
-			? state.goal.substring(0, 28) + "…"
-			: state.goal;
+		const shortGoal = truncateGoal(state.goal, 30);
+		const widgetGoal = truncateGoal(state.goal, 40);
+		const maxL = maxLabel(state.maxIterations);
 
 		ctx.ui.setStatus(
 			"loop",
 			ctx.ui.theme.fg(
 				state.paused ? "warning" : "accent",
-				`${prefix} ${shortGoal} [${state.iteration}/${state.maxIterations}]`,
+				`${prefix} ${shortGoal} [${state.iteration}/${maxL}]`,
 			),
 		);
 
-		const pct = Math.min(100, Math.round((state.iteration / state.maxIterations) * 100));
-		const barWidth = 20;
-		const filled = Math.round((pct / 100) * barWidth);
-
-		ctx.ui.setWidget("loop", [
-			`${prefix} 循环进行中`,
-			`目标: ${state.goal}`,
-			`进度: ${"█".repeat(filled)}${"░".repeat(barWidth - filled)} ${pct}%`,
-			`轮次: ${state.iteration} / ${state.maxIterations}`,
-			state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
-		]);
+		if (isFinite(state.maxIterations)) {
+			const pct = Math.min(100, Math.round((state.iteration / state.maxIterations) * 100));
+			const barWidth = 20;
+			const filled = Math.round((pct / 100) * barWidth);
+			ctx.ui.setWidget("loop", [
+				`${prefix} 循环进行中`,
+				`目标: ${widgetGoal}`,
+				`进度: ${"█".repeat(filled)}${"░".repeat(barWidth - filled)} ${pct}%`,
+				`轮次: ${state.iteration} / ${state.maxIterations}`,
+				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
+			]);
+		} else {
+			ctx.ui.setWidget("loop", [
+				`${prefix} 循环进行中`,
+				`目标: ${widgetGoal}`,
+				`轮次: 第 ${state.iteration} 轮（无限循环）`,
+				state.paused ? "⏸ 已暂停，/loop resume 恢复" : "💡 Escape 中止 | /loop pause 暂停",
+			]);
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -179,7 +197,7 @@ export default function (pi: ExtensionAPI) {
 	function buildFollowUpMessage(): string {
 		return (
 			`继续完成目标: "${state!.goal}"\n` +
-			`这是第 ${state!.iteration}/${state!.maxIterations} 轮。\n` +
+			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
 			`完成后请用 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记。`
 		);
 	}
@@ -187,7 +205,7 @@ export default function (pi: ExtensionAPI) {
 	function buildInitialMessage(): string {
 		return (
 			`你的目标是: "${state!.goal}"\n\n` +
-			`这是第 ${state!.iteration}/${state!.maxIterations} 轮。\n` +
+			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
 			"规则：\n" +
 			"1. 每轮结束后，用 [LOOP_CONTINUE] 表示还需要继续。\n" +
 			"2. 如果目标已完成，用 [LOOP_DONE] 表示。\n" +
@@ -243,7 +261,7 @@ export default function (pi: ExtensionAPI) {
 				state.paused = true;
 				state.active = false;
 				updateUI(ctx);
-				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${state.maxIterations} 轮）`, "info");
+				ctx.ui.notify(`⏸ 已暂停（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				return;
 			}
 
@@ -261,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 				state.active = true;
 				state.paused = false;
 				updateUI(ctx);
-				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${state.maxIterations} 轮）`, "info");
+				ctx.ui.notify(`▶️ 已恢复（第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮）`, "info");
 				sendMessage(buildFollowUpMessage(), ctx);
 				return;
 			}
@@ -270,7 +288,7 @@ export default function (pi: ExtensionAPI) {
 			if (input === "status") {
 				if (state) {
 					const status = state.active
-						? `🔄 第 ${state.iteration}/${state.maxIterations} 轮`
+						? `🔄 第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮`
 						: state.paused
 							? `⏸ 已暂停（第 ${state.iteration} 轮）`
 							: "已停止";
@@ -303,7 +321,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			updateUI(ctx);
-			ctx.ui.notify(`🔄 循环开始: "${goal}"（最多 ${maxIterations} 轮）`, "info");
+			ctx.ui.notify(`🔄 循环开始: "${goal}"（${isFinite(maxIterations) ? `最多 ${maxIterations} 轮` : "无限循环"}）`, "info");
 			sendMessage(buildInitialMessage(), ctx);
 		},
 	});
@@ -324,7 +342,7 @@ export default function (pi: ExtensionAPI) {
 				_e.systemPrompt +
 				`\n\n## Loop Mode（循环模式）\n` +
 				`你正在循环执行以下目标:\n"${state.goal}"\n` +
-				`当前进度: 第 ${state.iteration}/${state.maxIterations} 轮\n\n` +
+				`当前进度: 第 ${state.iteration}/${maxLabel(state.maxIterations)} 轮\n\n` +
 				`规则:\n` +
 				`1. 每次回复末尾，必须加上 [LOOP_CONTINUE] 或 [LOOP_DONE]\n` +
 				`2. [LOOP_CONTINUE] = 还需要继续，下一轮自动续跑\n` +
@@ -506,8 +524,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- 已达最大轮数 → 停止 ---
-		if (state.iteration >= state.maxIterations) {
+		// --- 已达最大轮数（仅限有限轮次时）→ 停止 ---
+		if (isFinite(state.maxIterations) && state.iteration >= state.maxIterations) {
 			const finalIteration = state.iteration;
 			state.active = false;
 			ctx.ui.setWidget("loop", [
@@ -518,7 +536,7 @@ export default function (pi: ExtensionAPI) {
 			setTimeout(() => {
 				if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
 			}, 5000);
-			ctx.ui.notify(`🛑 已达最大 ${state.maxIterations} 轮`, "warning");
+			ctx.ui.notify(`🛑 已达最大 ${maxLabel(state.maxIterations)} 轮`, "warning");
 			return;
 		}
 
