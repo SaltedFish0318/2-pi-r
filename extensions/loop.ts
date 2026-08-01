@@ -321,6 +321,17 @@ function getLastAssistantText(entries: any[]): string {
 	return "";
 }
 
+/** 最后一条 assistant 消息的 stopReason（agent_end 时判断连接错误用） */
+function getLastStopReason(entries: any[]): string {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (e.type === "message" && e.message.role === "assistant") {
+			return (e.message as { stopReason?: string }).stopReason ?? "";
+		}
+	}
+	return "";
+}
+
 // =========================================================================
 // 扩展入口
 // =========================================================================
@@ -1029,16 +1040,28 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- 连接错误（stopReason=error，空回复）→ 重试下一轮，不杀循环 ---
+		// --- 连接/网关错误（stopReason=error，如 terminated / Connection error）→ 不暂停、不续跑 ---
+		// pi 会对可重试错误自动重试（重试成功会再次触发 agent_end）；
+		// 若 pi 不重试（预算耗尽/非可重试），由 agent_settled 兜底续跑下一轮。
+		if (getLastStopReason(ctx.sessionManager.getEntries()) === "error") {
+			errorPending = true;
+			debugLog("本轮连接错误（stopReason=error），等待 pi 重试或 settled 兜底");
+			return;
+		}
+		errorPending = false; // 正常轮，清除错误待发标记
+
+		// --- 空回复（stopReason 非 error 但无内容）→ 重试下一轮 ---
 		if (lastText.trim().length === 0) {
 			state.iteration++;
 			pendingSend = true;
 			persistState(state);
 			updateUI(ctx);
-			ctx.ui.notify("⚠️ 本轮回复异常（网络/连接错误），自动重试下一轮", "warning");
-			debugLog("空回复（连接错误），重试下一轮");
+			ctx.ui.notify("⚠️ 本轮回复异常（空回复），自动重试下一轮", "warning");
+			debugLog("空回复，重试下一轮");
 			return;
 		}
+
+		// --- 契约起草阶段：[CONTRACT_PENDING] → 弹确认框（类似 permission 交互） ---
 
 		// --- [LOOP_DONE] → 目标完成（先经 LLM 裁判验证） ---
 		if (done) {
@@ -1153,6 +1176,17 @@ export default function (pi: ExtensionAPI) {
 		latestCtx = ctx;
 		if (moduleDead) return;
 		if (!state?.active || state.paused) return;
+		// 连接错误兜底：pi 未自动重试（重试预算耗尽/非可重试错误）→ 由我们续跑下一轮
+		if (errorPending) {
+			errorPending = false;
+			state.iteration++;
+			persistState(state);
+			updateUI(ctx);
+			ctx.ui.notify("⚠️ 本轮回复异常（连接错误），自动重试下一轮", "warning");
+			debugLog("settled 兜底：连接错误后重试下一轮");
+			sendMessage(buildFollowUpMessage(), ctx);
+			return;
+		}
 		if (!pendingSend) return;
 		pendingSend = false;
 		debugLog("agent_settled 续跑 followUp");
@@ -1169,6 +1203,7 @@ let autoTasks: AutoTask[] = loadTasksFromDisk();
 let moduleDead = false; // reload/卸载后置 true，阻止旧模块回调复活
 let piRef: ExtensionAPI | null = null;
 let pendingSend = false; // agent_end 后待发送的续跑消息（由 agent_settled 消费）
+let errorPending = false; // stopReason=error 轮：等待 pi 自动重试，或由 agent_settled 兜底续跑
 
 function dayKey(d: Date): string {
 	return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;

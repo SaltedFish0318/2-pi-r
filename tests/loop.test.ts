@@ -159,6 +159,34 @@ describe("loop 裁判与续跑", () => {
 		expect(h.logs.some(l => l.includes("你中止了本轮"))).toBe(true);
 	});
 
+	it("stopReason=error（terminated 截断）→ 不暂停，settled 兜底重试", async () => {
+		const h = await makeHarness();
+		await h.handlers["loop"]("测试目标", h.ctx);
+		// 有文本但被连接中断（terminated）——旧逻辑会误判"无标记→暂停"
+		h.session.push({ type: "message", message: { role: "assistant", content: "分页语义确认部分总结", stopReason: "error", errorMessage: "terminated" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
+		expect(h.logs.some(l => l.includes("缺少") || l.includes("已暂停"))).toBe(false);
+		// pi 不重试 → agent_settled 兜底续跑
+		await h.handlers["agent_settled"]({ type: "agent_settled" }, h.ctx);
+		expect(h.logs.some(l => l.includes("连接错误"))).toBe(true);
+		expect(h.logs.some(l => l.startsWith("[SEND]"))).toBe(true);
+	});
+
+	it("stopReason=error 后 pi 重试成功（正常标记）→ 正常继续不重复发送", async () => {
+		const h = await makeHarness();
+		await h.handlers["loop"]("测试目标", h.ctx);
+		h.session.push({ type: "message", message: { role: "assistant", content: "截断内容", stopReason: "error", errorMessage: "terminated" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
+		expect(h.logs.some(l => l.includes("已暂停"))).toBe(false);
+		// pi 重试成功：第二次 agent_end 带正常 [LOOP_CONTINUE]
+		h.session.push({ type: "message", message: { role: "assistant", content: "重试后继续 [LOOP_CONTINUE]" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
+		await h.handlers["agent_settled"]({ type: "agent_settled" }, h.ctx);
+		// 只发送一次续跑（没有 error 兜底 + 正常续跑双发）：1 条启动 + 1 条续跑
+		const sends = h.logs.filter(l => l.startsWith("[SEND]"));
+		expect(sends.length).toBe(2);
+	});
+
 	it("空回复（连接错误）→ 重试下一轮而非暂停", async () => {
 		const h = await makeHarness();
 		await h.handlers["loop"]("测试目标", h.ctx);
