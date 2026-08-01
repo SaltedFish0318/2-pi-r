@@ -928,8 +928,52 @@ export default function (pi: ExtensionAPI) {
 		const lastText = getLastAssistantText(ctx.sessionManager.getEntries());
 		const { done, cont } = detectMarkers(lastText);
 
-		// --- 契约起草阶段：[CONTRACT_PENDING] → 暂停等待用户确认 ---
+		// --- 契约起草阶段：[CONTRACT_PENDING] → 弹确认框（类似 permission 交互） ---
 		if (lastText.includes("[CONTRACT_PENDING]")) {
+			state.phase = "contract";
+			if (ctx.hasUI) {
+				const choice = await ctx.ui.select(
+					`📝 完成契约已起草\n\n目标: ${truncateGoal(state.goal, 50)}\n\n选择：`,
+					["✅ 开始执行", "📝 修改契约", "❌ 取消"],
+				);
+				if (choice === "✅ 开始执行") {
+					state.phase = "executing";
+					state.active = true;
+					state.paused = false;
+					state.pausedAt = undefined;
+					persistState(state);
+					updateUI(ctx);
+					ctx.ui.notify("✅ 契约已确认，开始执行", "success");
+					debugLog("契约确认（选择框），进入执行阶段");
+					setTimeout(() => {
+						if (moduleDead || !state?.active || state.paused) return;
+						sendMessage(buildFollowUpMessage() + "\n\n用户已确认完成契约，开始执行目标。", ctx);
+					}, 500);
+					return;
+				}
+				if (choice === "📝 修改契约") {
+					state.active = true;
+					state.paused = false;
+					state.pausedAt = undefined;
+					persistState(state);
+					updateUI(ctx);
+					ctx.ui.notify("📝 请重新起草契约", "info");
+					setTimeout(() => {
+						if (moduleDead || !state?.active || state.paused) return;
+						sendMessage(buildFollowUpMessage() + "\n\n用户要求修改契约：请重新起草 [CONTRACT]...[/CONTRACT] 并用 [CONTRACT_PENDING] 标记。", ctx);
+					}, 500);
+					return;
+				}
+				// 取消 → 暂停
+				state.active = false;
+				state.paused = true;
+				state.pausedAt = Date.now();
+				persistState(state);
+				updateUI(ctx);
+				ctx.ui.notify("契约未确认，循环已暂停 — /loop stop 取消或 /loop resume 继续", "info");
+				return;
+			}
+			// 无 UI：按旧逻辑暂停
 			state.phase = "contract";
 			state.active = false;
 			state.paused = true;
