@@ -34,5 +34,8 @@
   "bugs": {
     "url": "https://github.com/SaltedFish0318/2-pi-r/issues"
   },
-  "homepage": "https://github.com/SaltedFish0318/2-pi-r#readme"
+  "homepage": "https://github.com/SaltedFish0318/2-pi-r#readme",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
 }

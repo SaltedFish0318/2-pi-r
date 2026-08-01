@@ -171,6 +171,38 @@ pi -e ./extensions/loop.ts
 git add . && git commit -m "update" && git push
 ```
 
+## 💻 新机器完整安装清单（2-pi-r 同步）
+
+```bash
+# 1. 安装包
+pi install git:github.com/SaltedFish0318/2-pi-r
+pi install npm:pi-mcp-adapter
+pi install npm:pi-observational-memory
+pi install npm:@ff-labs/pi-fff
+
+# 2. 仓库内测试依赖（可选，跑单测用）
+cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
+```
+
+### 每台机器单独配置（不随仓库同步）
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| API Key | `~/.pi/agent/auth.json` | 各自登录 opencode-go |
+| MCP 服务器 | `~/.config/mcp/mcp.json` | wsl-mcp + context7 |
+| 权限模式 | `~/.pi/agent/permissions.json` | `/permission` 设置 |
+| 记忆配置 | `~/.pi/agent/settings.json` | `observational-memory` 键（ratio 模式） |
+| 配额 cookie | `~/.pi/agent/opencode-cookies.txt` | `/opencode-quota login` 导出 |
+
+### 需要编译的组件
+
+- **pi-computer-use Windows 桥**：新机器需 Rust GNU 工具链编译 `native/windows/bridge-rs`（`npm run build:windows`），生成 `windows-bridge.exe` 替换到 `~/.pi/agent/helpers/pi-computer-use/`
+
+### 使用注意
+
+- `pi-fff`：在项目目录跑 pi 时用 fffgrep/fffind（主目录会话会全盘扫描，勿用）
+- `loop` 状态文件（loop-state.json / loop-tasks.json）不跨机，复制文件即同步
+
 ## 🔧 loop.ts 结构说明（~1100 行，单文件未拆分）
 
 状态机（state）在 factory 闭包内共享，物理拆分需引入模块级状态（跨文件耦合 + 回归风险）；当前单文件分区清晰（持久化/契约/Judge/UI/自动触发/命令路由）+ 24 个单元测试已保证可维护性。
