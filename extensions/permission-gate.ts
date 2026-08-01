@@ -93,9 +93,10 @@ const READ_COMMANDS = [
  * 把危险命令名转成"作为命令执行"的正则：
  * 只匹配命令位置（行首或 ;/&&/| 之后，可带 sudo），
  * 不匹配参数/搜索文本/字符串里的关键词（如 grep "shutdown" 不误报）。
+ * 结尾允许空白/行尾/;&|（如 shutdown&echo 也能拦）。
  */
 function asCmd(name: string): string {
-	return `(^|[;&|\\n]\\s*)(sudo\\s+)?${name}(\\s|$)`;
+	return `(^|[;&|\\n]\\s*)(sudo\\s+)?${name}(\\s|$|[;&|])`;
 }
 
 const DANGEROUS_BASH: { pattern: string; label: string }[] = [

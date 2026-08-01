@@ -747,6 +747,7 @@ export default function (pi: ExtensionAPI) {
 			state.active = false;
 			state.paused = true;
 			state.pausedAt = Date.now();
+			persistState(state);
 			updateUI(ctx);
 			ctx.ui.notify("⏸ 已暂停（你中止了本轮）— /loop resume 继续，/loop stop 结束", "info");
 			return;
@@ -773,6 +774,8 @@ export default function (pi: ExtensionAPI) {
 		if (!cont) {
 			state.active = false;
 			state.paused = true;
+			state.pausedAt = Date.now();
+			persistState(state);
 			updateUI(ctx);
 			ctx.ui.notify("⚠️ AI 回复末尾缺少 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记，已暂停。可 /loop resume 继续", "warning");
 			return;
@@ -782,6 +785,7 @@ export default function (pi: ExtensionAPI) {
 		if (isFinite(state.maxIterations) && state.iteration >= state.maxIterations) {
 			const finalIteration = state.iteration;
 			state.active = false;
+			persistState(null); // 停止：删除持久化状态
 			ctx.ui.setWidget("loop", [
 				"🛑 循环已达最大轮数",
 				`目标: ${state.goal}`,
