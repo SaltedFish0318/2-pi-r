@@ -20,6 +20,24 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // =========================================================================
+// 调试日志（写入文件，reload 后可用于排查事件是否触发）
+// =========================================================================
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+const LOG_FILE = path.join(os.homedir(), ".pi", "agent", "loop-debug.log");
+function debugLog(msg: string): void {
+	try {
+		fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
+	} catch {
+		// 忽略日志写入失败
+	}
+	console.log("[loop] " + msg);
+}
+
+// =========================================================================
 // 状态定义
 // =========================================================================
 
@@ -268,6 +286,7 @@ export default function (pi: ExtensionAPI) {
 		description: "循环工作 /loop <goal> | max=N <goal> | stop | pause | resume | status",
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
+			debugLog("command /loop args=" + JSON.stringify(input.slice(0, 60)));
 
 			if (!input) {
 				ctx.ui.notify(
@@ -392,7 +411,7 @@ export default function (pi: ExtensionAPI) {
 	// reload/会话切换时清理残留 UI（状态已重置，UI 不能还挂着旧面板）
 	// 用 globalThis 标志跨模块实例传递"需要清理"信号（旧模块 shutdown 时设置）
 	pi.on("session_shutdown", (_e, ctx) => {
-		console.log("[loop] session_shutdown");
+		debugLog("session_shutdown");
 		moduleDead = true;
 		// 关键：杀掉本模块的定时器，否则 reload 后旧 interval 会把面板重新画回来
 		if (loopTimer) {
@@ -404,13 +423,13 @@ export default function (pi: ExtensionAPI) {
 		(globalThis as any).__loopStaleUI = true;
 	});
 	pi.on("session_start", (e, ctx) => {
-		console.log("[loop] session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI);
+		debugLog("session_start reason=" + e.reason + " stale=" + (globalThis as any).__loopStaleUI);
 		const stale = (globalThis as any).__loopStaleUI === true;
 		if (stale || e.reason === "reload") {
 			(globalThis as any).__loopStaleUI = false;
 			ctx.ui.setWidget("loop", undefined);
 			ctx.ui.setStatus("loop", undefined);
-			console.log("[loop] 残留 UI 已清理");
+			debugLog("残留 UI 已清理");
 		}
 	});
 
@@ -442,7 +461,7 @@ export default function (pi: ExtensionAPI) {
 			(globalThis as any).__loopStaleUI = false;
 			ctxForAuto()?.ui.setWidget("loop", undefined);
 			ctxForAuto()?.ui.setStatus("loop", undefined);
-			console.log("[loop] interval 兜底清理残留 UI");
+			debugLog("interval 兜底清理残留 UI");
 		}
 		// 运行时间刷新（运行中或暂停中都刷新）
 		if (state && latestCtx) {
@@ -589,6 +608,7 @@ export default function (pi: ExtensionAPI) {
 	// agent_end：每轮结束后检查标记，决定是否继续
 	// =======================================================================
 	pi.on("agent_end", async (_event, ctx) => {
+		debugLog("agent_end active=" + state?.active + " paused=" + state?.paused);
 		latestCtx = ctx;
 		if (!state?.active || state.paused) return;
 
