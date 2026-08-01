@@ -238,6 +238,13 @@ export default function (pi: ExtensionAPI) {
 			return { action: "deny", remember: false }; // 非交互模式默认拒绝
 		}
 
+		// 广播事件：notify 扩展收到后发系统通知，提醒用户有确认在等待
+		try {
+			pi.events.emit("permission:ask", { title, detail });
+		} catch {
+			/* ignore */
+		}
+
 		const choice = await ctx.ui.select(
 			`⚠️ ${title}\n\n${detail}\n\n如何决定？`,
 			["✅ 允许一次", "🔁 总是允许", "🚫 不允许", "⛔ 总是不允许"],
