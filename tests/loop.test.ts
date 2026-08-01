@@ -4,6 +4,18 @@
  *       暂停/恢复（pendingSend）、settled 续跑、持久化
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+const STATE_FILE = path.join(os.homedir(), ".pi", "agent", "loop-state.json");
+const TASKS_FILE = path.join(os.homedir(), ".pi", "agent", "loop-tasks.json");
+
+// 每个测试前清状态文件：防止测试间通过真实文件泄漏状态（前序测试写入的 active=true 会拦截后续启动）
+beforeEach(() => {
+	try { fs.rmSync(STATE_FILE, { force: true }); } catch { /* ignore */ }
+	try { fs.rmSync(TASKS_FILE, { force: true }); } catch { /* ignore */ }
+});
 
 async function loadLoop() {
 	vi.resetModules(); // 每个测试重新加载模块（隔离模块级状态）
@@ -138,12 +150,25 @@ describe("loop 裁判与续跑", () => {
 		expect(h.logs.filter(l => l.startsWith("[SEND]")).length).toBe(before);
 	});
 
-	it("ESC 中止（空回复）→ 暂停", async () => {
+	it("ESC 中止（signal.aborted）→ 暂停", async () => {
+		const h = await makeHarness();
+		await h.handlers["loop"]("测试目标", h.ctx);
+		const abortedCtx = { ...h.ctx, signal: { aborted: true } };
+		h.session.push({ type: "message", message: { role: "assistant", content: "" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, abortedCtx);
+		expect(h.logs.some(l => l.includes("你中止了本轮"))).toBe(true);
+	});
+
+	it("空回复（连接错误）→ 重试下一轮而非暂停", async () => {
 		const h = await makeHarness();
 		await h.handlers["loop"]("测试目标", h.ctx);
 		h.session.push({ type: "message", message: { role: "assistant", content: "" } });
 		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
-		expect(h.logs.some(l => l.includes("你中止了本轮") || l.includes("已暂停"))).toBe(true);
+		expect(h.logs.some(l => l.includes("自动重试下一轮"))).toBe(true);
+		expect(h.logs.some(l => l.includes("你中止了本轮"))).toBe(false);
+		// settled 后应发送下一轮
+		await h.handlers["agent_settled"]({ type: "agent_settled" }, h.ctx);
+		expect(h.logs.some(l => l.startsWith("[SEND]") && l.includes("继续完成目标"))).toBe(true);
 	});
 });
 
@@ -151,6 +176,7 @@ describe("loop 持久化", () => {
 	it("启动/暂停/停止时 appendEntry 状态同步", async () => {
 		const h = await makeHarness();
 		await h.handlers["loop"]("持久化测试", h.ctx);
+		await new Promise(r => setTimeout(r, 300)); // 等待模块初始化完成（vitest resetModules 时序）
 		expect(h.appended.filter(([t]) => t === "loop-state").length).toBeGreaterThan(0);
 		const startEntry = h.appended[h.appended.length - 1][1];
 		expect(startEntry.goal).toBe("持久化测试");

@@ -928,7 +928,7 @@ export default function (pi: ExtensionAPI) {
 					systemPrompt: `你是目标完成度裁判。根据给出的证据严格判断目标是否真正完成。\n只输出 JSON，格式: {"verdict":"done"|"continue","reason":"简短原因"}\n- done: 证据充分支持目标已完成\n- continue: 目标未完成或有明显差距，reason 说明还缺什么`,
 					messages: [userMessage],
 				},
-				{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: undefined },
+				{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: AbortSignal.timeout(30_000) },
 			);
 			const text = resp.content
 				.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
@@ -1018,14 +1018,25 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		// --- 用户主动中止（ESC / abort）→ 安静暂停，不弹"未找到标记"警告 ---
-		const userAborted = ctx.signal?.aborted === true || lastText.trim().length === 0;
-		if (userAborted) {
+		// 仅 signal.aborted 视为用户中止；空回复+stopReason=error 是连接错误，走重试
+		if (ctx.signal?.aborted === true) {
 			state.active = false;
 			state.paused = true;
 			state.pausedAt = Date.now();
 			persistState(state);
 			updateUI(ctx);
 			ctx.ui.notify("⏸ 已暂停（你中止了本轮）— /loop resume 继续，/loop stop 结束", "info");
+			return;
+		}
+
+		// --- 连接错误（stopReason=error，空回复）→ 重试下一轮，不杀循环 ---
+		if (lastText.trim().length === 0) {
+			state.iteration++;
+			pendingSend = true;
+			persistState(state);
+			updateUI(ctx);
+			ctx.ui.notify("⚠️ 本轮回复异常（网络/连接错误），自动重试下一轮", "warning");
+			debugLog("空回复（连接错误），重试下一轮");
 			return;
 		}
 
