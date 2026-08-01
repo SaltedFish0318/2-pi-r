@@ -42,11 +42,21 @@ node scripts/build-native.mjs --platform windows
 /loop resume            # 恢复
 /loop stop              # 停止
 /loop status            # 查看进度
+
+# ⚡ 自动触发（无需手动启动）
+/loop schedule in=30m <目标>        # 30 分钟后自动开始（一次性）
+/loop schedule 09:30 <目标>        # 每天 09:30 自动开始
+/loop watch gold below=4000 <目标>  # 伦敦金跌破 4000 自动开始（实时监控）
+/loop watch gold above=4120 <目标>  # 伦敦金涨破 4120 自动开始
+/loop auto list                    # 查看所有自动任务
+/loop auto cancel <id>             # 取消自动任务
 ```
 
 AI 回复末尾的标记约定：
 - `[LOOP_CONTINUE]` = 还需要继续，下一轮自动续跑
 - `[LOOP_DONE]` = 目标已完成，循环停止
+
+**自动触发**：扩展在 pi 进程内常驻，每 5 秒检查一次任务。定时任务到点自动启动循环；金价任务实时拉取新浪行情（hf_XAU），条件满足即自动触发。pi 关闭后任务失效（如需 pi 关闭也监控，可配合 Windows 计划任务）。
 
 ### 🔔 notify.ts — 系统通知
 

@@ -17,7 +17,7 @@
  * 按 Escape 可随时中止。
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // =========================================================================
 // 状态定义
@@ -29,6 +29,26 @@ interface LoopState {
 	maxIterations: number;
 	active: boolean;
 	paused: boolean;
+}
+
+/**
+ * 自动触发任务：到时间/条件满足时自动启动循环，无需手动 /loop。
+ */
+interface AutoTask {
+	id: string;
+	kind: "time" | "gold";
+	goal: string;
+	maxIterations: number;
+	description: string;
+	// time 类型：
+	delayMs?: number; // 一次性：N 毫秒后触发
+	createdAt: number;
+	dailyTime?: string; // 每日："HH:MM" 触发
+	lastFiredDay?: string; // 每日任务当天已触发标记 "YYYY-MM-DD"
+	// gold 类型：
+	goldDir?: "below" | "above";
+	goldPrice?: number;
+	fired: boolean;
 }
 
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -195,6 +215,12 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// --- schedule/watch/auto: 自动触发任务 ---
+			if (input.startsWith("schedule ") || input.startsWith("watch ") || input === "auto" || input.startsWith("auto ")) {
+				handleAutoCommand(input, ctx);
+				return;
+			}
+
 			// --- stop ---
 			if (input === "stop") {
 				if (state) {
@@ -287,14 +313,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// =======================================================================
-	// before_agent_start：注入系统提示
+	// 自动触发（定时 / 金价条件）
 	// =======================================================================
-	pi.on("before_agent_start", async (event) => {
+
+	let latestCtx: ExtensionContext | null = null;
+
+	// 从事件中持续更新最新 ctx（reload/会话切换后仍可用）
+	pi.on("before_agent_start", async (_e, ctx) => {
+		latestCtx = ctx;
 		if (!state?.active) return undefined;
 
 		return {
 			systemPrompt:
-				event.systemPrompt +
+				_e.systemPrompt +
 				`\n\n## Loop Mode（循环模式）\n` +
 				`你正在循环执行以下目标:\n"${state.goal}"\n` +
 				`当前进度: 第 ${state.iteration}/${state.maxIterations} 轮\n\n` +
@@ -307,10 +338,180 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+	// 定时检查自动任务
+	setInterval(() => {
+		if (autoTasks.length === 0) return;
+		const now = new Date();
+		const today = dayKey(now);
+
+		for (const t of autoTasks) {
+			if (t.fired) continue;
+			let hit = false;
+
+			if (t.kind === "time") {
+				if (t.delayMs !== undefined) {
+					hit = now.getTime() >= t.createdAt + t.delayMs;
+				} else if (t.dailyTime) {
+					if (t.lastFiredDay === today) continue; // 今天已触发
+					const [h, m] = t.dailyTime.split(":").map(Number);
+					const curMin = now.getHours() * 60 + now.getMinutes();
+					hit = curMin >= h * 60 + m;
+				}
+				if (hit && t.dailyTime) t.lastFiredDay = today;
+			} else if (t.kind === "gold") {
+				// 金价条件：异步拉取，命中即触发（一次性）
+				fetchXAU().then((price) => {
+					if (price === null || t.fired || state?.active) return;
+					const ok = t.goldDir === "below" ? price < t.goldPrice! : price > t.goldPrice!;
+					if (ok) {
+						t.fired = true;
+						startAutoLoop(t, ctxForAuto());
+					}
+				});
+				continue;
+			}
+
+			if (hit) {
+				t.fired = true;
+				startAutoLoop(t, ctxForAuto());
+			}
+		}
+
+		autoTasks = autoTasks.filter((t) => !t.fired || !!t.dailyTime);
+	}, 5000);
+
+	function ctxForAuto(): ExtensionContext | undefined {
+		return latestCtx ?? undefined;
+	}
+
+	function startAutoLoop(t: AutoTask, ctx?: ExtensionContext) {
+		if (state?.active) {
+			console.log(`[loop] 自动任务 "${t.description}" 命中，但已有循环在运行，跳过`);
+			return;
+		}
+		state = {
+			goal: t.goal,
+			iteration: 1,
+			maxIterations: t.maxIterations,
+			active: true,
+			paused: false,
+		};
+		if (ctx) {
+			updateUI(ctx);
+			ctx.ui.notify(`⚡ 自动触发循环: "${t.goal}"`, "info");
+		}
+		console.log(`[loop] 自动触发: ${t.description}`);
+		if (ctx) {
+			sendMessage(buildInitialMessage(), ctx);
+		} else {
+			console.warn("[loop] 自动触发但没有可用 ctx，等待下一轮检查重试");
+			state.active = false;
+			state.paused = true;
+		}
+	}
+
+	function handleAutoCommand(input: string, ctx: ExtensionCommandContext) {
+		// --- auto list ---
+		if (input === "auto" || input === "auto list") {
+			if (autoTasks.length === 0) {
+				ctx.ui.notify("没有自动任务。用 /loop schedule / /loop watch 添加", "info");
+				return;
+			}
+			const lines = autoTasks.map((t) => `[${t.id}] ${t.description} ${t.fired ? "(已触发)" : "(待触发)"}`);
+			ctx.ui.notify(lines.join("\n"), "info");
+			return;
+		}
+
+		// --- auto cancel <id> ---
+		if (input.startsWith("auto cancel ")) {
+			const id = input.slice("auto cancel ".length).trim();
+			const before = autoTasks.length;
+			autoTasks = autoTasks.filter((t) => t.id !== id);
+			ctx.ui.notify(
+				autoTasks.length < before ? `已取消自动任务 [${id}]` : `未找到任务 [${id}]`,
+				"info",
+			);
+			return;
+		}
+
+		// --- schedule in=30m <goal> ---
+		let m = input.match(/^schedule\s+in=(\d+)([mh])\s+(.+)$/);
+		if (m) {
+			const n = parseInt(m[1]!, 10);
+			const unit = m[2]!;
+			const delayMs = (unit === "h" ? n * 3600 : n * 60) * 1000;
+			const task: AutoTask = {
+				id: "t" + (autoTasks.length + 1) + "-" + Date.now().toString(36).slice(-4),
+				kind: "time",
+				goal: m[3]!.trim(),
+				maxIterations: DEFAULT_MAX_ITERATIONS,
+				description: `${delayMs / 60000} 分钟后自动开始`,
+				delayMs,
+				createdAt: Date.now(),
+				fired: false,
+			};
+			autoTasks.push(task);
+			latestCtx = ctx;
+			ctx.ui.notify(`⏰ 已安排: ${task.description} → "${task.goal}" [${task.id}]`, "info");
+			return;
+		}
+
+		// --- schedule 09:30 <goal> (每日) ---
+		m = input.match(/^schedule\s+(\d{1,2}:\d{2})\s+(.+)$/);
+		if (m) {
+			const task: AutoTask = {
+				id: "d" + (autoTasks.length + 1) + "-" + Date.now().toString(36).slice(-4),
+				kind: "time",
+				goal: m[2]!.trim(),
+				maxIterations: DEFAULT_MAX_ITERATIONS,
+				description: `每天 ${m[1]} 自动开始`,
+				dailyTime: m[1]!,
+				createdAt: Date.now(),
+				fired: false,
+			};
+			autoTasks.push(task);
+			latestCtx = ctx;
+			ctx.ui.notify(`⏰ 已安排: ${task.description} → "${task.goal}" [${task.id}]`, "info");
+			return;
+		}
+
+		// --- watch gold below=4000 <goal> ---
+		m = input.match(/^watch\s+gold\s+(below|above)=(\d+(?:\.\d+)?)\s+(.+)$/);
+		if (m) {
+			const task: AutoTask = {
+				id: "g" + (autoTasks.length + 1) + "-" + Date.now().toString(36).slice(-4),
+				kind: "gold",
+				goal: m[3]!.trim(),
+				maxIterations: DEFAULT_MAX_ITERATIONS,
+				description: `伦敦金 ${m[1] === "below" ? "跌破" : "涨破"} ${m[2]} 自动开始`,
+				goldDir: m[1] as "below" | "above",
+				goldPrice: parseFloat(m[2]!),
+				createdAt: Date.now(),
+				fired: false,
+			};
+			autoTasks.push(task);
+			latestCtx = ctx;
+			ctx.ui.notify(`👀 已盯盘: ${task.description} → "${task.goal}" [${task.id}]`, "info");
+			return;
+		}
+
+		ctx.ui.notify(
+			"用法:\n" +
+				"/loop schedule in=30m <目标> — 30分钟后自动开始\n" +
+				"/loop schedule 09:30 <目标> — 每天09:30自动开始\n" +
+				"/loop watch gold below=4000 <目标> — 金价跌破4000自动开始\n" +
+				"/loop watch gold above=4120 <目标> — 金价涨破4120自动开始\n" +
+				"/loop auto list — 查看任务\n" +
+				"/loop auto cancel <id> — 取消任务",
+			"info",
+		);
+	}
+
 	// =======================================================================
 	// agent_end：每轮结束后检查标记，决定是否继续
 	// =======================================================================
 	pi.on("agent_end", async (_event, ctx) => {
+		latestCtx = ctx;
 		if (!state?.active || state.paused) return;
 
 		// 解析标记
@@ -368,4 +569,33 @@ export default function (pi: ExtensionAPI) {
 			sendMessage(buildFollowUpMessage(), ctx);
 		}, 500);
 	});
+}
+
+// =========================================================================
+// 模块级：自动任务状态 + 工具函数
+// =========================================================================
+
+let autoTasks: AutoTask[] = [];
+
+function dayKey(d: Date): string {
+	return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+/** 拉取伦敦金最新价（新浪行情，GBK 编码） */
+async function fetchXAU(): Promise<number | null> {
+	try {
+		const res = await fetch("https://hq.sinajs.cn/list=hf_XAU", {
+			headers: { Referer: "https://finance.sina.com.cn" },
+		});
+		if (!res.ok) return null;
+		const buf = new Uint8Array(await res.arrayBuffer());
+		const text = new TextDecoder("gbk").decode(buf);
+		const m = text.match(/hf_XAU="([^"]+)"/);
+		if (!m) return null;
+		const fields = m[1]!.split(",");
+		const price = parseFloat(fields[0]!);
+		return isNaN(price) ? null : price;
+	} catch {
+		return null;
+	}
 }
