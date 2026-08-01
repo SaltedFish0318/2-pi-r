@@ -529,6 +529,16 @@ export default function (pi: ExtensionAPI) {
 		const lastText = getLastAssistantText(ctx.sessionManager.getEntries());
 		const { done, cont } = detectMarkers(lastText);
 
+		// --- 用户主动中止（ESC / abort）→ 安静暂停，不弹"未找到标记"警告 ---
+		const userAborted = ctx.signal?.aborted === true || lastText.trim().length === 0;
+		if (userAborted) {
+			state.active = false;
+			state.paused = true;
+			updateUI(ctx);
+			ctx.ui.notify("⏸ 已暂停（你中止了本轮）— /loop resume 继续，/loop stop 结束", "info");
+			return;
+		}
+
 		// --- [LOOP_DONE] → 目标完成 ---
 		if (done) {
 			const finalIteration = state.iteration;
@@ -545,12 +555,12 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- 无标记 → 暂停 ---
+		// --- 无标记（AI 忘了标记）→ 暂停 ---
 		if (!cont) {
 			state.active = false;
 			state.paused = true;
 			updateUI(ctx);
-			ctx.ui.notify("⏸ 循环暂停——回复中未找到 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记", "warning");
+			ctx.ui.notify("⚠️ AI 回复末尾缺少 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记，已暂停。可 /loop resume 继续", "warning");
 			return;
 		}
 
