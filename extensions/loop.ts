@@ -584,8 +584,8 @@ export default function (pi: ExtensionAPI) {
 			ctxForAuto()?.ui.setStatus("loop", undefined);
 			debugLog("interval 兜底清理残留 UI");
 		}
-		// 运行时间刷新（运行中或暂停中都刷新）
-		if (state && latestCtx) {
+		// 运行时间刷新（仅运行中需要；暂停时时间冻结，面板静态，避免每秒重绘干扰 TUI）
+		if (state?.active && latestCtx) {
 			updateUI(latestCtx);
 		}
 
