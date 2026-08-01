@@ -151,7 +151,11 @@ Host github.com
 
 把模糊任务转成严格的 loop 完成契约（借鉴 codex-goal 的契约写法）——**loop 的契约预处理器**：
 
-
+```text
+/create-goal 迁移认证到 Vitest
+→ AI 输出 [CONTRACT]（判据/验证/约束）
+→ 用户复制 /loop 启动
+```
 
 与 /loop 的关系：loop 负责执行闭环（契约确认→执行→裁判验证）；create-goal 负责把模糊需求变成高质量契约输入。
 
