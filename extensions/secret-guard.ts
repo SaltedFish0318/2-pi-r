@@ -23,7 +23,7 @@ import { homedir } from "os";
 // =========================================================================
 
 const SENSITIVE_KEY_PATTERN =
-	/API_KEY|APITOKEN|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|ACCESS_KEY|AUTH|BEARER|SESSION_KEY|CLIENT_SECRET/i;
+	/(^|_)(API_?KEY|APITOKEN|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|ACCESS_?KEY|AUTH|BEARER|SESSION_?KEY|CLIENT_?SECRET)(_|$)/i;
 
 // =========================================================================
 // 常见密钥格式（正则）

@@ -14,8 +14,9 @@ import { execFile } from "node:child_process";
 import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
-const EXT_DIR = new URL(".", import.meta.url).pathname;
+const EXT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const STATUS_FILE = join(homedir(), ".pi", "agent", "computer-use-status.txt");
 const WINDOW_SCRIPT = join(EXT_DIR, "..", "scripts", "status-window.ps1");
 

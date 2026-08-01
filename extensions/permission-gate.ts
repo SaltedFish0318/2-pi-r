@@ -85,7 +85,6 @@ const READ_COMMANDS = [
 	"npm -v",
 	"python --version",
 	"npx -v",
-	"node -e",
 	"git remote -v",
 	"git config",
 ];

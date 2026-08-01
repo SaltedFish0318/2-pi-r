@@ -102,8 +102,19 @@ function loadTasksFromDisk(): AutoTask[] {
 // =========================================================================
 // 调试日志（写入文件，reload 后可用于排查事件是否触发）
 // =========================================================================
+const LOG_FILE = path.join(os.homedir(), ".pi", "agent", "loop-debug.log");
+let logSizeChecked = false;
 function debugLog(msg: string): void {
 	try {
+		if (!logSizeChecked) {
+			logSizeChecked = true;
+			// 每次模块加载只截断一次：文件超过 200KB 时保留最后 200 行（防止无限循环日志膨胀）
+			const stat = fs.statSync(LOG_FILE);
+			if (stat.size > 200_000) {
+				const lines = fs.readFileSync(LOG_FILE, "utf8").split("\n").slice(-200);
+				fs.writeFileSync(LOG_FILE, lines.join("\n") + "\n");
+			}
+		}
 		fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`);
 	} catch {
 		// 忽略日志写入失败
@@ -614,7 +625,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startAutoLoop(t: AutoTask, ctx?: ExtensionContext) {
 		if (state?.active) {
-			console.log(`[loop] 自动任务 "${t.description}" 命中，但已有循环在运行，跳过`);
+			debugLog(`自动任务 "${t.description}" 命中，但已有循环在运行，跳过`);
 			return;
 		}
 		state = {
@@ -631,11 +642,11 @@ export default function (pi: ExtensionAPI) {
 			updateUI(ctx);
 			ctx.ui.notify(`⚡ 自动触发循环: "${t.goal}"`, "info");
 		}
-		console.log(`[loop] 自动触发: ${t.description}`);
+		debugLog(`自动触发: ${t.description}`);
 		if (ctx) {
 			sendMessage(buildInitialMessage(), ctx);
 		} else {
-			console.warn("[loop] 自动触发但没有可用 ctx，等待下一轮检查重试");
+			debugLog("自动触发但没有可用 ctx，等待下一轮检查重试");
 			state.active = false;
 			state.paused = true;
 		}
