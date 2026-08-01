@@ -14,6 +14,8 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 
 | 扩展 | 功能 | 是否自动 | 命令 |
 |------|------|:--------:|------|
+| `question.ts` | 交互提问（AI 弹选项让你选，借鉴 bd-dxg/my-pi） |
+| `questionnaire.ts` | 单题/多题问卷（tab 切换 + 汇总） |
 | `loop.ts` | 循环模式（类似 Claude Code `/loop` / Codex goal） | 手动 | `/loop <目标>` |
 | `notify.ts` | AI 忙完发系统通知 | 自动 | 无 |
 | `permission-gate.ts` | Codex 风格权限审批（4 种模式） | 自动 | `/permission` |
