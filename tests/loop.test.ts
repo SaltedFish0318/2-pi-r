@@ -121,21 +121,41 @@ describe("loop 契约流程", () => {
 	});
 });
 
-describe("loop 裁判与续跑", () => {
-	it("[LOOP_DONE] + 裁判不可用 → fail-open 完成", async () => {
+describe("loop 完成判定与续跑（Codex 风格）", () => {
+	it("[LOOP_DONE] 声明 → 循环结束（无裁判）", async () => {
 		const h = await makeHarness();
 		await h.handlers["loop"]("测试目标", h.ctx);
 		h.session.push({ type: "message", message: { role: "assistant", content: "完成了 [LOOP_DONE]" } });
 		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
-		expect(h.logs.some(l => l.includes("裁判不可用") || l.includes("目标完成"))).toBe(true);
+		expect(h.logs.some(l => l.includes("目标完成"))).toBe(true);
 		// 持久化清除
 		expect(h.appended.some(([t, d]) => t === "loop-state" && d?.ended)).toBe(true);
 	});
 
-	it("[LOOP_CONTINUE] → pendingSend → agent_settled 才发送", async () => {
+	it("自然语言完成声明（✅ 已完成）→ 循环结束", async () => {
 		const h = await makeHarness();
 		await h.handlers["loop"]("测试目标", h.ctx);
-		h.session.push({ type: "message", message: { role: "assistant", content: "进展 [LOOP_CONTINUE]" } });
+		h.session.push({ type: "message", message: { role: "assistant", content: "所有阶段都跑完了，✅ 已完成" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
+		expect(h.logs.some(l => l.includes("目标完成"))).toBe(true);
+		expect(h.appended.some(([t, d]) => t === "loop-state" && d?.ended)).toBe(true);
+	});
+
+	it("回复含完成字样但还有下一步 → 不算完成声明，自动续跑", async () => {
+		const h = await makeHarness();
+		await h.handlers["loop"]("测试目标", h.ctx);
+		h.session.push({ type: "message", message: { role: "assistant", content: "本轮完成了数据采集，下一步做回放验证" } });
+		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
+		// 无暂停、无完成
+		expect(h.logs.some(l => l.includes("已暂停") || l.includes("目标完成"))).toBe(false);
+		await h.handlers["agent_settled"]({ type: "agent_settled" }, h.ctx);
+		expect(h.logs.some(l => l.startsWith("[SEND]") && l.includes("继续完成目标"))).toBe(true);
+	});
+
+	it("无标记自然回复 → 自动续跑（settled 才发送）", async () => {
+		const h = await makeHarness();
+		await h.handlers["loop"]("测试目标", h.ctx);
+		h.session.push({ type: "message", message: { role: "assistant", content: "进展：已处理第 3 批数据" } });
 		await h.handlers["agent_end"]({ type: "agent_end", messages: [] }, h.ctx);
 		// agent_end 后不应立即发送（settled 才发）
 		const sendsAtEnd = h.logs.filter(l => l.startsWith("[SEND]")).length;

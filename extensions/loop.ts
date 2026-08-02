@@ -55,7 +55,6 @@ function persistState(s: LoopState | null): void {
 			startedAt: s.startedAt,
 			pausedMs: s.pausedMs ?? 0,
 			pausedAt: s.pausedAt ?? null,
-			judgeContinues: s.judgeContinues ?? 0,
 			phase: s.phase ?? "executing",
 		};
 		fs.writeFileSync(STATE_FILE, JSON.stringify(out));
@@ -86,7 +85,6 @@ function loadStateFromBranch(ctx: ExtensionContext): LoopState | null {
 						startedAt: (d.startedAt as number) ?? Date.now(),
 						pausedMs: (d.pausedMs as number) ?? 0,
 						pausedAt: (d.pausedAt as number | null) ?? undefined,
-						judgeContinues: (d.judgeContinues as number) ?? 0,
 						phase: (d.phase as "contract" | "executing") ?? "executing",
 					};
 				}
@@ -114,7 +112,6 @@ function loadStateFromDisk(): LoopState | null {
 			startedAt: d.startedAt ?? Date.now(),
 			pausedMs: d.pausedMs ?? 0,
 			pausedAt: d.pausedAt ?? undefined,
-			judgeContinues: d.judgeContinues ?? 0,
 			phase: (d.phase as "contract" | "executing") ?? "executing",
 		};
 	} catch (err) {
@@ -198,8 +195,6 @@ interface LoopState {
 	startedAt: number; // 循环开始时间戳（ms），用于显示已运行时长
 	pausedAt?: number; // 进入暂停的时间戳，暂停期间时间冻结
 	pausedMs: number; // 累计暂停时长（ms），resume 时累加
-	pendingJudge?: boolean; // [LOOP_DONE] 后正在裁判验证，防止重复触发
-	judgeContinues?: number; // 连续被裁判驳回次数（达到上限转人工确认）
 	phase?: "contract" | "executing"; // contract=起草契约待确认；executing=执行中
 }
 
@@ -220,7 +215,6 @@ interface AutoTask {
 }
 
 const DEFAULT_MAX_ITERATIONS = Infinity; // 默认无限循环，除非显式 max=N
-const JUDGE_MAX_CONTINUES = 3; // 裁判连续驳回上限：超过后强制转人工确认（防自指目标死循环）
 
 /** 轮次上限显示：有限时 "50"，无限时 "∞" */
 function maxLabel(m: number): string {
@@ -326,9 +320,19 @@ function parseArgs(input: string): { goal: string; maxIterations: number } {
 
 function detectMarkers(text: string): { done: boolean; cont: boolean } {
 	return {
-		done: text.includes("[LOOP_DONE]"),
+		done: text.includes("[LOOP_DONE]") || isCompletionClaim(text),
 		cont: text.includes("[LOOP_CONTINUE]"),
 	};
+}
+
+/**
+ * 完成声明检测（Codex 风格：模型自判完成）。
+ * 只看回复末尾（最后 300 字符）：明确说"完成/结束/done"且没有"继续/下一步/未完成"等续做信号。
+ */
+function isCompletionClaim(text: string): boolean {
+	const tail = text.slice(-300);
+	if (/继续|下一步|接下来|待办|未完成|还要|剩余/.test(tail)) return false;
+	return /\[LOOP_DONE\]|(?:任务|目标|全部)?(?:已)?完成|任务结束|全部搞定|(?:all\s+)?done|finished|completed|complete/.test(tail);
 }
 
 interface TextContentBlock {
@@ -493,8 +497,7 @@ export default function (pi: ExtensionAPI) {
 		return (
 			`继续完成目标: "${state!.goal}"\n` +
 			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
-			`完成后请用 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记。\n` +
-			"（声明 [LOOP_DONE] 时必须附 [EVIDENCE] 证据清单：具体文件/命令输出/测试结果）"
+			"持续执行直到任务真正完成。完成后请明确声明（如「✅ 已完成」或 [LOOP_DONE]）并总结成果；遇阻塞说明原因即可停下。"
 		);
 	}
 
@@ -502,7 +505,7 @@ export default function (pi: ExtensionAPI) {
 		return (
 			`你的目标是: "${state!.goal}"\n\n` +
 			`这是第 ${state!.iteration}/${maxLabel(state!.maxIterations)} 轮。\n` +
-			"规则：\n" +
+			"执行方式（持续执行，直到完成）：\n" +
 			"1. **目标判据判断**：如果目标的完成判据已明确（可客观验证），直接开始执行，无需契约；如果目标模糊或完成标准不明确，第一轮先起草完成契约：\n" +
 			"   [CONTRACT]\n" +
 			"   完成判据: （客观可验证的标准）\n" +
@@ -510,13 +513,9 @@ export default function (pi: ExtensionAPI) {
 			"   关键约束: （不能违反的限制）\n" +
 			"   [/CONTRACT]\n" +
 			"   末尾用 [CONTRACT_PENDING] 标记，等待用户确认后再执行。\n" +
-			"2. 用户确认（回复\"开始执行\"）后，从下一轮开始执行目标。\n" +
-			"3. 每轮结束后，用 [LOOP_CONTINUE] 表示还需要继续。\n" +
-			"4. 声明 [LOOP_DONE] 前，**必须附证据清单**：\n" +
-			"   [EVIDENCE]\n" +
-			"   - 具体文件路径 / 命令输出 / 测试结果\n" +
-			"   [/EVIDENCE]\n" +
-			"5. 每轮都要有实质进展。"
+			"2. 用户确认（回复「开始执行」）后，继续执行目标。\n" +
+			"3. 持续执行直到任务真正完成：完成后请明确声明（如「✅ 已完成」或 [LOOP_DONE]）并总结成果；不要中途停下等确认。\n" +
+			"4. 每轮都要有实质进展；遇到无法解决的阻塞时说明原因后停下。"
 		);
 	}
 
@@ -964,68 +963,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// =======================================================================
-	// 完成度裁判（LLM Judge）：[LOOP_DONE] 时验证是否真正完成
-	// =======================================================================
-
-	/** 收集最近的进展证据（AI 回复 + 工具结果摘要） */
-	function getRecentEvidence(ctx: ExtensionContext): string {
-		const entries = ctx.sessionManager.getEntries();
-		const parts: string[] = [];
-		for (let i = entries.length - 1; i >= 0 && parts.length < 5; i--) {
-			const e = entries[i];
-			if (e.type !== "message") continue;
-			const m = e.message as { role?: string; content?: unknown };
-			if (m.role === "assistant") {
-				const c = extractText(m.content);
-				if (c.trim()) parts.push("AI: " + c.trim().slice(0, 300));
-			} else if (m.role === "toolResult") {
-				const c = extractText(m.content);
-				if (c.trim()) parts.push("工具结果: " + c.trim().slice(0, 200));
-			}
-		}
-		return parts.reverse().join("\n");
-	}
-
-	/** 调用 LLM 裁判（当前模型，fresh context） */
-	async function runJudge(ctx: ExtensionContext, goal: string, evidence: string, aiEvidence?: string): Promise<{ verdict: "done" | "continue"; reason: string } | null> {
-		try {
-			if (!ctx.model) return null;
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-			if (!auth.ok || !auth.apiKey) return null;
-			const userMessage: UserMessage = {
-				role: "user",
-				content: [{ type: "text", text: `目标: ${goal}\n\n完成声明: AI 报告 [LOOP_DONE]\n\nAI 声称的证据清单:\n${aiEvidence || "（未提供）"}\n\n最近进展证据（对话记录）:\n${evidence}` }],
-				timestamp: Date.now(),
-			};
-			const resp = await complete(
-				ctx.model,
-				{
-					systemPrompt: `你是目标完成度裁判。根据给出的证据严格判断目标是否真正完成。\n只输出 JSON，格式: {"verdict":"done"|"continue","reason":"简短原因"}\n- done: 证据充分支持目标已完成\n- continue: 目标未完成或有明显差距，reason 说明还缺什么`,
-					messages: [userMessage],
-				},
-				{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: AbortSignal.timeout(30_000) },
-			);
-			const text = resp.content
-				.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-			if (/"verdict"\s*:\s*"done"/.test(text)) {
-				const reason = text.match(/"reason"\s*:\s*"([^"]*)"/)?.[1] ?? "";
-				return { verdict: "done", reason };
-			}
-			if (/"verdict"\s*:\s*"continue"/.test(text)) {
-				const reason = text.match(/"reason"\s*:\s*"([^"]*)"/)?.[1] ?? "证据不足";
-				return { verdict: "continue", reason };
-			}
-			debugLog("judge 响应无法解析: " + text.slice(0, 200));
-			return null;
-		} catch (err) {
-			debugLog("judge 调用失败: " + (err as Error).message);
-			return null;
-		}
-	}
-
-	// =======================================================================
 	// agent_end：每轮结束后检查标记，决定是否继续
 	// =======================================================================
 	pi.on("agent_end", async (_event, ctx) => {
@@ -1035,7 +972,7 @@ export default function (pi: ExtensionAPI) {
 
 		// 解析标记
 		const lastText = getLastAssistantText(ctx.sessionManager.getEntries());
-		const { done, cont } = detectMarkers(lastText);
+		const { done } = detectMarkers(lastText);
 
 		// --- 契约起草阶段：[CONTRACT_PENDING] → 弹确认框（类似 permission 交互） ---
 		if (lastText.includes("[CONTRACT_PENDING]")) {
@@ -1127,87 +1064,21 @@ export default function (pi: ExtensionAPI) {
 
 		// --- 契约起草阶段：[CONTRACT_PENDING] → 弹确认框（类似 permission 交互） ---
 
-		// --- [LOOP_DONE] → 目标完成（先经 LLM 裁判验证） ---
+		// --- 完成声明（模型自判，Codex 风格：明确说完成即结束） ---
 		if (done) {
-			if (state.pendingJudge) return; // 裁判中，防重复
-
-			// 提取 AI 声明的证据清单 [EVIDENCE]
-			const evidenceMatch = lastText.match(/\[EVIDENCE\]([\s\S]*?)\[\/EVIDENCE\]/);
-			const aiEvidence = evidenceMatch?.[1]?.trim() ?? "";
-
 			const finalIteration = state.iteration;
-			// 裁判验证：防 AI 假完成
-			state.pendingJudge = true;
-			persistState(state);
-			ctx.ui.notify("🔍 完成度裁判验证中...", "info");
-			const evidence = getRecentEvidence(ctx);
-			const verdict = await runJudge(ctx, state.goal, evidence, aiEvidence);
-			state.pendingJudge = false;
-
-		if (verdict?.verdict === "continue") {
-			state.judgeContinues = (state.judgeContinues ?? 0) + 1;
-			if (state.judgeContinues >= JUDGE_MAX_CONTINUES) {
-				// 连续被驳回达上限 → 强制结束，转人工确认（防自指目标死循环）
-				state.active = false;
-				persistState(null);
-				ctx.ui.setWidget("loop", [
-					"⚠️ 裁判多次未通过，已转人工确认",
-					`目标: ${truncateGoal(state.goal, 40)}`,
-					`连续驳回: ${state.judgeContinues} 次`,
-					"请人工判断目标是否真正完成（/loop 重新启动或放弃）",
-				]);
-				setTimeout(() => {
-					if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
-				}, 8000);
-				ctx.ui.notify(
-					`⚠️ 裁判连续 ${state.judgeContinues} 次未通过，已停止循环 — 请人工确认目标完成情况`,
-					"warning",
-				);
-				debugLog("裁判连续驳回达上限，强制停止转人工");
-				return;
-			}
-			// 裁判判定未完成 → 继续循环并反馈差距
-			state.active = true;
-			state.paused = false;
-			state.iteration++; // 进入下一轮
-			persistState(state);
-			updateUI(ctx);
-			ctx.ui.notify(`⚖️ 裁判判定未完成（${state.judgeContinues}/${JUDGE_MAX_CONTINUES}），继续执行 — ${verdict.reason}`, "warning");
-			setTimeout(() => {
-				if (moduleDead || !state?.active || state.paused) return;
-				sendMessage(buildFollowUpMessage() + `\n\n⚖️ 完成度裁判反馈（需继续，${state.judgeContinues}/${JUDGE_MAX_CONTINUES}）: ${verdict.reason}`, ctx);
-			}, 500);
-			return;
-		}
-
-		// 裁判通过（或裁判不可用时 fail-open）→ 完成
-		state.active = false;
-		state.judgeContinues = 0;
-		persistState(null); // 完成：删除持久化状态，不再恢复
+			state.active = false;
+			persistState(null); // 完成：删除持久化状态，不再恢复
 			ctx.ui.setWidget("loop", [
 				"✅ 目标已完成! 🎉",
 				`目标: ${state.goal}`,
-				`完成轮次: 第 ${finalIteration} 轮`,//
-				verdict?.verdict === "done" ? `⚖️ 裁判确认: ${verdict.reason || "通过"}` : "⚖️ 裁判不可用，按完成处理",
+				`完成轮次: 第 ${finalIteration} 轮`,
 			]);
 			setTimeout(() => {
 				if (!state || !state.active) ctx.ui.setWidget("loop", undefined);
 			}, 5000);
-			ctx.ui.notify(
-				verdict?.verdict === "done" ? `✅ 目标完成（裁判确认）! 🎉` : `✅ 目标完成! 🎉`,
-				"success",
-			);
-			return;
-		}
-
-		// --- 无标记（AI 忘了标记）→ 暂停 ---
-		if (!cont) {
-			state.active = false;
-			state.paused = true;
-			state.pausedAt = Date.now();
-			persistState(state);
-			updateUI(ctx);
-			ctx.ui.notify("⚠️ AI 回复末尾缺少 [LOOP_CONTINUE] 或 [LOOP_DONE] 标记，已暂停。可 /loop resume 继续", "warning");
+			ctx.ui.notify("✅ 目标完成! 🎉", "success");
+			debugLog("完成声明，循环结束（第 " + finalIteration + " 轮）");
 			return;
 		}
 
@@ -1228,7 +1099,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// --- [LOOP_CONTINUE] → 继续下一轮（发送延迟到 agent_settled） ---
+		// --- 未声明完成 → 自动续跑（Codex 风格：持续执行直到完成） ---
 		state.iteration++;
 		pendingSend = true;
 		persistState(state);
