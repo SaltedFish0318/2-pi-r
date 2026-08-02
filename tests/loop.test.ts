@@ -5,6 +5,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
+
+// 模拟 complete（标题提取/裁判共用）：默认返回"测试标题"；judge 测试因 auth {ok:false} 不触达 complete
+vi.mock("@earendil-works/pi-ai/compat", () => ({
+	complete: vi.fn(async () => ({ content: [{ type: "text", text: "测试标题" }] })),
+}));
 import * as path from "node:path";
 import * as os from "node:os";
 
@@ -246,5 +251,27 @@ describe("loop 持久化", () => {
 		};
 		await h.handlers["session_start"]({ type: "session_start", reason: "resume" }, branchCtx);
 		expect(h.logs.some(l => l.includes("已恢复"))).toBe(false);
+	});
+});
+
+describe("loop 标题提取", () => {
+	it("启动后异步提取短标题并显示在 widget", async () => {
+		const h = await makeHarness();
+		h.ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "test-key" });
+		const widgetCalls: any[] = [];
+		h.ctx.ui.setWidget = (name: string, content: any) => { if (name === "loop") widgetCalls.push(content); };
+		await h.handlers["loop"]("这是一个非常非常长的目标，涉及多个阶段：第一阶段做数据采集，第二阶段做精确回放，第三阶段训练模型，第四阶段验证结果", h.ctx);
+		await new Promise(r => setTimeout(r, 300)); // 等异步标题提取完成
+		expect(widgetCalls.some(w => JSON.stringify(w).includes("测试标题"))).toBe(true);
+	});
+
+	it("标题提取失败（auth 不可用）→ 回退到截断目标", async () => {
+		const h = await makeHarness(); // 默认 getApiKeyAndHeaders → {ok:false}
+		const widgetCalls: any[] = [];
+		h.ctx.ui.setWidget = (name: string, content: any) => { if (name === "loop") widgetCalls.push(content); };
+		await h.handlers["loop"]("一个长目标", h.ctx);
+		await new Promise(r => setTimeout(r, 300));
+		expect(widgetCalls.some(w => JSON.stringify(w).includes("一个长目标"))).toBe(true);
+		expect(widgetCalls.some(w => JSON.stringify(w).includes("测试标题"))).toBe(false);
 	});
 });

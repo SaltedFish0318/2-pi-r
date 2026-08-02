@@ -2,7 +2,23 @@
  * permission-gate 单元测试
  * 覆盖：asCmd 危险命令匹配（命令位置 vs 参数文本）、PowerShell 模式、拦截行为
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+// 隔离真实配置：用户机器上 ~/.pi/agent/permissions.json 可能是 full-access（无人值守），
+// 测试用临时配置文件（auto 模式，测试围绕 auto 设计）+ PI_PERMISSIONS_FILE 覆盖。
+let tempCfg = "";
+beforeAll(() => {
+	tempCfg = path.join(os.tmpdir(), "pi-perm-test-" + Date.now() + ".json");
+	fs.writeFileSync(tempCfg, JSON.stringify({ mode: "auto" }), "utf8");
+	process.env.PI_PERMISSIONS_FILE = tempCfg;
+});
+afterAll(() => {
+	delete process.env.PI_PERMISSIONS_FILE;
+	try { fs.rmSync(tempCfg, { force: true }); } catch { /* ignore */ }
+});
 
 interface ToolCallHandler {
 	(event: { toolName: string; input: { command: string } }, ctx: any): Promise<any>;

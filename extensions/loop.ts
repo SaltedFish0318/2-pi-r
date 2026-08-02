@@ -47,6 +47,7 @@ function persistState(s: LoopState | null): void {
 		}
 		const out = {
 			goal: s.goal,
+			title: s.title,
 			iteration: s.iteration,
 			maxIterations: isFinite(s.maxIterations) ? s.maxIterations : null, // JSON 不支持 Infinity
 			active: s.active,
@@ -189,6 +190,7 @@ function setStaleFlag(v: boolean): void {
 
 interface LoopState {
 	goal: string;
+	title?: string; // LLM 提取的短标题（widget 显示用），提取失败时回退到截断目标
 	iteration: number;
 	maxIterations: number;
 	active: boolean;
@@ -228,6 +230,50 @@ function maxLabel(m: number): string {
 /** 截断长目标文本（status 30 字符 / widget 40 字符） */
 function truncateGoal(s: string, limit: number): string {
 	return s.length > limit ? s.substring(0, limit - 1) + "…" : s;
+}
+
+/**
+ * 用 LLM 把长目标提取为短标题（类似 pi 自动生成 session 标题）。
+ * 失败时返回 undefined（调用方回退到截断目标）。
+ */
+async function summarizeGoal(ctx: ExtensionContext, goal: string): Promise<string | undefined> {
+	try {
+		if (!ctx.model) return undefined;
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+		if (!auth.ok || !auth.apiKey) return undefined;
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: `为下面的任务目标生成一个简洁标题（≤24 字，中文，概括要做什么即可，不要引号）：\n\n${goal.slice(0, 2000)}`,
+				},
+			],
+			timestamp: Date.now(),
+		};
+		const resp = await complete(
+			ctx.model,
+			{
+				systemPrompt: "你是标题生成器。只输出标题本身，不要任何解释、引号或前后缀。",
+				messages: [userMessage],
+			},
+			{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: AbortSignal.timeout(15_000) },
+		);
+		const text = resp.content
+			.filter((c: any): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n")
+			.trim()
+			.replace(/^["'“”«»「『]+|["'“”«»」』]+$/g, "")
+			.replace(/\s+/g, " ")
+			.slice(0, 40);
+		if (!text) return undefined;
+		debugLog("目标标题: " + text);
+		return text;
+	} catch (err) {
+		debugLog("目标标题提取失败: " + (err as Error).message);
+		return undefined;
+	}
 }
 
 /** 已运行时长：扣除累计暂停时间；暂停期间冻结不再增长 */
@@ -355,8 +401,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const prefix = state.paused ? "⏸" : "🔄";
-		const shortGoal = truncateGoal(state.goal, 30);
-		const widgetGoal = truncateGoal(state.goal, 40);
+		const shortGoal = truncateGoal(state.title ?? state.goal, 30);
+		const widgetGoal = truncateGoal(state.title ?? state.goal, 40);
 		const elapsed = elapsedOf(state);
 
 		// --- 暂停中的循环：保留提示，方便 resume/stop ---
@@ -602,6 +648,15 @@ export default function (pi: ExtensionAPI) {
 			updateUI(ctx);
 			ctx.ui.notify(`🔄 循环开始: "${goal}"（${isFinite(maxIterations) ? `最多 ${maxIterations} 轮` : "无限循环"}）`, "info");
 			sendMessage(buildInitialMessage(), ctx);
+			// LLM 提取短标题（异步，不阻塞启动；失败回退到截断目标）
+			(async () => {
+				const title = await summarizeGoal(ctx, goal);
+				if (title && state?.goal === goal && state.active) {
+					state.title = title;
+					persistState(state);
+					updateUI(ctx);
+				}
+			})();
 		},
 	});
 
@@ -815,6 +870,15 @@ export default function (pi: ExtensionAPI) {
 		debugLog(`自动触发: ${t.description}`);
 		if (ctx) {
 			sendMessage(buildInitialMessage(), ctx);
+			// LLM 提取短标题（异步；失败回退到截断目标）
+			(async () => {
+				const title = await summarizeGoal(ctx, t.goal);
+				if (title && state?.goal === t.goal && state.active) {
+					state.title = title;
+					persistState(state);
+					updateUI(ctx);
+				}
+			})();
 		} else {
 			debugLog("自动触发但没有可用 ctx，等待下一轮检查重试");
 			state.active = false;

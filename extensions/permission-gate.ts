@@ -162,7 +162,7 @@ const PROTECTED_PATHS = [
 // =========================================================================
 
 const CONFIG_PATHS = [
-	join(homedir(), ".pi", "agent", "permissions.json"),
+	process.env.PI_PERMISSIONS_FILE ?? join(homedir(), ".pi", "agent", "permissions.json"),
 	join(process.cwd(), ".pi", "permissions.json"),
 ];
 
