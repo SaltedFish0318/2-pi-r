@@ -186,6 +186,33 @@ async function exportCookiesViaCdp(port: number): Promise<string> {
 	});
 }
 
+/** 检测是否有浏览器进程在运行（不带调试端口也算），用于给出更精确的提示 */
+async function findRunningBrowsers(): Promise<string[]> {
+	const names: string[] = [];
+	if (process.platform === "win32") {
+		try {
+			const { stdout } = await execFileAsync(
+				"powershell",
+				["-NoProfile", "-Command", "Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"],
+				{ timeout: 8000 },
+			);
+			for (const line of stdout.split(/\r?\n/)) {
+				const name = line.trim().toLowerCase();
+				if (name && !names.includes(name)) names.push(name);
+			}
+		} catch { /* ignore */ }
+	} else {
+		try {
+			const { stdout } = await execFileAsync("ps", ["-eo", "comm"], { timeout: 8000 });
+			for (const line of stdout.split(/\r?\n/)) {
+				const comm = line.trim().toLowerCase();
+				if (/(chrome|chromium|edge)/.test(comm) && !comm.includes("crashpad") && !names.includes(comm)) names.push(comm);
+			}
+		} catch { /* ignore */ }
+	}
+	return names;
+}
+
 // =========================================================================
 // 内置 footer 复刻（token 统计）+ 额度追加
 // =========================================================================
@@ -354,10 +381,13 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("🔍 正在扫描运行中的 Chrome/Edge 的调试端口...", "info");
 					const ports = await findCdpPorts();
 					if (ports.length === 0) {
+						const running = await findRunningBrowsers();
 						ctx.ui.notify(
-							process.platform === "win32"
-								? "❌ 未找到带调试端口的浏览器。\n请先启动托管 Chrome 并登录 opencode.ai（或让 pi 打开浏览器），再运行本命令。"
-								: "❌ 未找到带调试端口的浏览器。\n请先启动带调试端口的浏览器并登录 opencode.ai，例如：\nchromium --remote-debugging-port=9222 https://opencode.ai\n（或 google-chrome）然后重新运行本命令。",
+							running.length > 0
+								? `❌ 检测到浏览器正在运行（${running.slice(0, 3).join(", ")}），但未带调试端口。\n请先完全退出浏览器（含后台进程），再用带调试端口的命令重新启动，例如：\n${process.platform === "win32" ? "msedge --remote-debugging-port=9222 https://opencode.ai" : "microsoft-edge --remote-debugging-port=9222 https://opencode.ai"}\n然后重新运行本命令。`
+								: process.platform === "win32"
+									? "❌ 未找到带调试端口的浏览器。\n请先启动托管 Chrome 并登录 opencode.ai（或让 pi 打开浏览器），再运行本命令。"
+									: "❌ 未找到带调试端口的浏览器。\n请先启动带调试端口的浏览器并登录 opencode.ai，例如：\nchromium --remote-debugging-port=9222 https://opencode.ai\n（或 google-chrome / microsoft-edge）然后重新运行本命令。",
 							"error",
 						);
 						return;
