@@ -1,2 +1,3 @@
 node_modules/
 pi-computer-use/native/*/bridge-rs/target/
+pi-computer-use/prebuilt/

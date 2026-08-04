@@ -176,6 +176,7 @@ cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
 ### 需要编译的组件
 
 - **pi-computer-use Windows 桥**：新机器需 Rust GNU 工具链编译 `native/windows/bridge-rs`（`npm run build:windows`），生成 `windows-bridge.exe` 替换到 `~/.pi/agent/helpers/pi-computer-use/`
+- **pi-computer-use Linux 桥**：在 `pi-computer-use/` 下运行 `node scripts/build-native.mjs --platform linux`（需 Rust 工具链），或设 `PI_COMPUTER_USE_ALLOW_BUILD=1` 安装时自动编译。产物在 `prebuilt/`（已 gitignore，不入仓库）
 
 ### 使用注意
 
