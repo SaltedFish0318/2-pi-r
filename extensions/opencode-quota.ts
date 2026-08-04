@@ -143,16 +143,40 @@ function parseQuota(html: string): Omit<QuotaData, "fetchedAt" | "error"> | null
 
 async function findCdpPorts(): Promise<Array<{ port: number; isEdge: boolean }>> {
 	const ports: Array<{ port: number; isEdge: boolean }> = [];
-	try {
-		// PowerShell 查 chrome.exe / msedge.exe 带 --remote-debugging-port 的进程
-		const script = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" | Where-Object { $_.CommandLine -match 'remote-debugging-port' } | ForEach-Object { $_.Name + ' ' + [regex]::Match($_.CommandLine, 'remote-debugging-port=(\\d+)').Groups[1].Value }`;
-		const { stdout } = await execFileAsync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000 });
-		for (const line of stdout.split(/\r?\n/)) {
-			const m = line.trim().match(/^(chrome|msedge)\.exe (\d+)$/);
-			if (m) ports.push({ port: parseInt(m[2]), isEdge: m[1] === "msedge.exe" });
+	const seen = new Set<number>();
+	function push(port: number, isEdge: boolean) {
+		if (!seen.has(port)) {
+			seen.add(port);
+			ports.push({ port, isEdge });
 		}
-	} catch {
-		/* ignore */
+	}
+	if (process.platform === "win32") {
+		try {
+			// PowerShell 查 chrome.exe / msedge.exe 带 --remote-debugging-port 的进程
+			const script = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" | Where-Object { $_.CommandLine -match 'remote-debugging-port' } | ForEach-Object { $_.Name + ' ' + [regex]::Match($_.CommandLine, 'remote-debugging-port=(\\d+)').Groups[1].Value }`;
+			const { stdout } = await execFileAsync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000 });
+			for (const line of stdout.split(/\r?\n/)) {
+				const m = line.trim().match(/^(chrome|msedge)\.exe (\d+)$/);
+				if (m) push(parseInt(m[2]), m[1] === "msedge.exe");
+			}
+		} catch {
+			/* ignore */
+		}
+	} else {
+		// Linux/macOS: ps 扫描 chrome/chromium/google-chrome/edge 进程的 --remote-debugging-port
+		try {
+			const { stdout } = await execFileAsync("ps", ["-eo", "comm,args"], { timeout: 8000 });
+			for (const line of stdout.split(/\r?\n/)) {
+				const m = line.match(/^(\S+)\s+.*remote-debugging-port=(\d+)/);
+				if (!m) continue;
+				const comm = m[1].toLowerCase();
+				if (/(chrome|chromium|edge)/.test(comm)) {
+					push(parseInt(m[2]), /edge/.test(comm));
+				}
+			}
+		} catch {
+			/* ignore */
+		}
 	}
 	return ports;
 }
