@@ -16,11 +16,12 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 |------|------|:--------:|------|
 | `question.ts` | 交互提问（AI 弹选项让你选，借鉴 bd-dxg/my-pi） |
 | `questionnaire.ts` | 单题/多题问卷（tab 切换 + 汇总） |
-| `loop.ts` | 循环模式（类似 Claude Code `/loop` / Codex goal） | 手动 | `/loop <目标>` |
 | `notify.ts` | AI 忙完发系统通知 | 自动 | 无 |
 | `permission-gate.ts` | Codex 风格权限审批（4 种模式） | 自动 | `/permission` |
 | `secret-guard.ts` | 密钥保护（拦截 + 屏蔽敏感信息） | 自动 | `/secret`（诊断用） |
 | `pi-computer-use/` | 电脑控制（桌面 + 浏览器自动化，fork 自 [injaneity/pi-computer-use](https://github.com/injaneity/pi-computer-use)，MIT） | 自动 | `/computer-use` |
+
+> **loop.ts 已移除**（v0.3.0）：循环模式改用社区包 `npm:@narumitw/pi-goal`（功能更完善：token 预算、无进展自动暂停、`goal_complete` 结构化完成判定）。安装：`pi install npm:@narumitw/pi-goal`，命令 `/goal`。
 
 ### 🖥️ computer-use（fork 版）
 
@@ -32,31 +33,6 @@ node scripts/build-native.mjs --platform windows
 ```
 
 或在 `pi-computer-use/` 下运行 `npm run build:windows`。
-
-### 🔄 loop.ts — 循环模式
-
-让 AI 持续迭代工作直到目标完成。
-
-```
-/loop <目标>            # 开始循环（默认无限轮次）
-/loop max=100 <目标>    # 显式限定轮数（上限 200）
-/loop pause             # 暂停（保留进度）
-/loop resume            # 恢复
-/loop stop              # 停止
-/loop status            # 查看进度
-
-# ⚡ 自动触发（无需手动启动）
-/loop schedule in=30m <目标>        # 30 分钟后自动开始（一次性）
-/loop schedule 09:30 <目标>        # 每天 09:30 自动开始
-/loop auto list                    # 查看所有自动任务
-/loop auto cancel <id>             # 取消自动任务
-```
-
-AI 回复末尾的标记约定：
-- `[LOOP_CONTINUE]` = 还需要继续，下一轮自动续跑
-- `[LOOP_DONE]` = 目标已完成，循环停止
-
-**自动触发**：扩展在 pi 进程内常驻，每 5 秒检查一次任务，到点自动启动循环。loop 是**通用**指令——领域特定需求（如金价盯盘）直接写在目标文本里，由 AI 在循环内自行使用工具实现，例如：`/loop 持续监控伦敦金，跌破 4000 时分析原因并给出操作建议`。pi 关闭后任务失效（如需 pi 关闭也监控，可配合 Windows 计划任务）。
 
 ### 🔔 notify.ts — 系统通知
 
@@ -149,24 +125,24 @@ Host github.com
 
 ## 📋 /create-goal prompt 模板
 
-把模糊任务转成严格的 loop 完成契约（借鉴 codex-goal 的契约写法）——**loop 的契约预处理器**：
+把模糊任务转成严格的目标完成契约（借鉴 codex-goal 的契约写法）——**目标驱动工作流的契约预处理器**：
 
 ```text
 /create-goal 迁移认证到 Vitest
 → AI 输出 [CONTRACT]（判据/验证/约束）
-→ 用户复制 /loop 启动
+→ 用户复制到 /goal 启动
 ```
 
-与 /loop 的关系：loop 负责执行闭环（契约确认→执行→裁判验证）；create-goal 负责把模糊需求变成高质量契约输入。
+与目标驱动工作流（如 `@narumitw/pi-goal`）的关系：goal 负责执行闭环（契约确认→执行→验证）；create-goal 负责把模糊需求变成高质量契约输入。
 
 ## 🛠️ 开发
 
 ```bash
 git clone git@github.com:SaltedFish0318/2-pi-r.git
 npm install        # 安装测试依赖（vitest 等）
-npm test           # 运行单元测试（24 个：permission 8 / secret-guard 5 / loop 11）
+npm test           # 运行单元测试（13 个：permission 8 / secret-guard 5）
 # 本地测试单个扩展
-pi -e ./extensions/loop.ts
+pi -e ./extensions/notify.ts
 # 修改后推送
 git add . && git commit -m "update" && git push
 ```
@@ -179,6 +155,7 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 pi install npm:pi-mcp-adapter
 pi install npm:pi-observational-memory
 pi install npm:@ff-labs/pi-fff
+pi install npm:@narumitw/pi-goal
 
 # 2. 仓库内测试依赖（可选，跑单测用）
 cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
@@ -201,22 +178,9 @@ cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
 ### 使用注意
 
 - `pi-fff`：在项目目录跑 pi 时用 fffgrep/fffind（主目录会话会全盘扫描，勿用）
-- `loop` 状态文件（loop-state.json / loop-tasks.json）不跨机，复制文件即同步
-
-## 🔧 loop.ts 结构说明（~1100 行，单文件未拆分）
-
-状态机（state）在 factory 闭包内共享，物理拆分需引入模块级状态（跨文件耦合 + 回归风险）；当前单文件分区清晰（持久化/契约/Judge/UI/自动触发/命令路由）+ 24 个单元测试已保证可维护性。
-
-## 💾 持久化文件与多机同步
-
-| 文件 | 内容 | 跨机器 |
-|------|------|--------|
-| `~/.pi/agent/loop-state.json` | 当前循环状态 | 复制文件即同步 |
-| `~/.pi/agent/loop-tasks.json` | 自动触发任务 | 复制文件即同步 |
-| 会话 custom entry（appendEntry） | 分支状态 | 跟随会话文件 |
-
-多机使用：把两个 json 复制到另一台机器的 `~/.pi/agent/` 即可恢复循环。
 
 ## 📝 变更记录
 
+- **0.3.0** 移除 loop.ts（改用社区包 `@narumitw/pi-goal`）；README 同步更新
+- **0.2.1** 当前版本
 - **0.1.0** 初始版本：loop / notify / permission-gate / secret-guard

@@ -1,7 +1,7 @@
 {
   "name": "pi-tools",
-  "version": "0.2.1",
-  "description": "Pi 自定义扩展集合：loop / notify / permission-gate / secret-guard / computer-use / cu-status 状态窗",
+  "version": "0.3.0",
+  "description": "Pi 自定义扩展集合：notify / permission-gate / secret-guard / computer-use / question / questionnaire",
   "keywords": [
     "pi-package",
     "pi",
