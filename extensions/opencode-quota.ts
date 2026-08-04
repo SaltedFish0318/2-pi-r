@@ -6,7 +6,8 @@
  * 用法:
  *   /opencode-quota            — 查看当前额度 + 状态
  *   /opencode-quota refresh    — 立即刷新
- *   /opencode-quota login      — 从运行中的 Chrome/Edge 导出登录态
+ *   /opencode-quota login      — 独立窗口登录（不影响正在使用的浏览器），自动导出登录态
+ *   /opencode-quota cookie <cookies> — 手动粘贴 cookie（兜底，F12 → Application → Cookies 复制）
  *   /opencode-quota workspace <id> — 设置 workspace ID
  *   /opencode-quota clear      — 清除登录态
  */
@@ -14,13 +15,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
 
 const require = createRequire(import.meta.url);
 const EXT_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -210,31 +212,86 @@ async function exportCookiesViaCdp(port: number): Promise<string> {
 	});
 }
 
-/** 检测是否有浏览器进程在运行（不带调试端口也算），用于给出更精确的提示 */
-async function findRunningBrowsers(): Promise<string[]> {
-	const names: string[] = [];
-	if (process.platform === "win32") {
+/**
+ * 独立窗口登录：启动一个独立的浏览器实例（独立 profile + 随机端口），
+ * 不影响用户正在使用的浏览器。登录后自动导出 cookie 并关闭。
+ */
+
+async function findBrowserBinary(): Promise<string | null> {
+	const candidates =
+		process.platform === "win32"
+			? ["msedge", "chrome", "chrome.exe", "msedge.exe"]
+			: ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "microsoft-edge-stable", "microsoftedge"];
+	for (const name of candidates) {
 		try {
-			const { stdout } = await execFileAsync(
-				"powershell",
-				["-NoProfile", "-Command", "Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"],
-				{ timeout: 8000 },
-			);
-			for (const line of stdout.split(/\r?\n/)) {
-				const name = line.trim().toLowerCase();
-				if (name && !names.includes(name)) names.push(name);
-			}
-		} catch { /* ignore */ }
-	} else {
-		try {
-			const { stdout } = await execFileAsync("ps", ["-eo", "comm"], { timeout: 8000 });
-			for (const line of stdout.split(/\r?\n/)) {
-				const comm = line.trim().toLowerCase();
-				if (/(chrome|chromium|edge)/.test(comm) && !comm.includes("crashpad") && !names.includes(comm)) names.push(comm);
-			}
-		} catch { /* ignore */ }
+			const { stdout } = await execFileAsync("which", [name], { timeout: 3000 });
+			const p = stdout.trim().split(/\r?\n/)[0];
+			if (p && existsSync(p)) return p;
+		} catch { /* next */ }
 	}
-	return names;
+	return null;
+}
+
+function getFreePort(): Promise<number> {
+	return new Promise((resolve) => {
+		const srv = createServer();
+		srv.listen(0, "127.0.0.1", () => {
+			const port = (srv.address() as { port: number }).port;
+			srv.close(() => resolve(port));
+		});
+	});
+}
+
+function killBrowserTreeByProfile(profileDir: string): void {
+	try {
+		if (process.platform === "win32") {
+			execFile(
+				"powershell",
+				["-NoProfile", "-Command", `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '${profileDir}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
+				() => {},
+			);
+		} else {
+			execFile("pkill", ["-f", profileDir], () => {});
+		}
+	} catch { /* ignore */ }
+}
+
+async function loginViaDedicatedWindow(): Promise<string | null> {
+	const browser = await findBrowserBinary();
+	if (!browser) return null;
+
+	const port = await getFreePort();
+	const profileDir = mkdtempSync(join(tmpdir(), "opencode-quota-"));
+
+	const proc = spawn(
+		browser,
+		[
+			`--remote-debugging-port=${port}`,
+			`--user-data-dir=${profileDir}`,
+			"--no-first-run",
+			"--no-default-browser-check",
+			"https://opencode.ai",
+		],
+		{ detached: true, stdio: "ignore" },
+	);
+	proc.unref();
+
+	const deadline = Date.now() + 5 * 60 * 1000; // 5 分钟超时
+	try {
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 2000));
+			if (proc.exitCode !== null) break; // 浏览器窗口被用户关闭
+			try {
+				const exported = await exportCookiesViaCdp(port);
+				// 必须出现 auth cookie 才算登录成功（未登录时也会有 oc_locale 等访客 cookie）
+				if (exported && /(^|;\s*)auth=/.test(exported)) return exported;
+			} catch { /* 浏览器尚未就绪 */ }
+		}
+	} finally {
+		killBrowserTreeByProfile(profileDir);
+		setTimeout(() => rmSync(profileDir, { recursive: true, force: true }), 2000);
+	}
+	return null;
 }
 
 // =========================================================================
@@ -395,42 +452,66 @@ export default function (pi: ExtensionAPI) {
 
 	// /opencode-quota 命令
 	pi.registerCommand("opencode-quota", {
-		description: "OpenCode Go 订阅额度：/opencode-quota [refresh|login|clear|workspace <id>]",
+		description: "OpenCode Go 订阅额度：/opencode-quota [refresh|login|cookie <cookies>|clear|workspace <id>]",
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
+
+			// cookie 命令需要保留整段 cookie（含空格），单独解析
+			if (input.startsWith("cookie ")) {
+				const cookies = input.slice("cookie ".length).trim().replace(/^["']|["']$/g, "");
+				if (!cookies) {
+					ctx.ui.notify("用法: /opencode-quota cookie \"name=value; name2=value2\"", "info");
+					return;
+				}
+				writeFileSync(cfg.cookiePath, cookies, "utf-8");
+				await refresh();
+				if (quota.fetchedAt) {
+					ctx.ui.notify("✅ cookie 已保存，额度已刷新", "success");
+				} else {
+					ctx.ui.notify(`⚠️ cookie 已保存但刷新失败: ${quota.error ?? ""}`, "warning");
+				}
+				return;
+			}
+
 			const [cmd, param] = input.split(/\s+/, 2);
 
 			switch (cmd) {
 				case "login": {
-					ctx.ui.notify("🔍 正在扫描运行中的 Chrome/Edge 的调试端口...", "info");
+					// 方式 1:用户已有带调试端口的浏览器 → 直接导出（兼容旧用法）
 					const ports = await findCdpPorts();
-					if (ports.length === 0) {
-						const running = await findRunningBrowsers();
-						ctx.ui.notify(
-							running.length > 0
-								? `❌ 检测到浏览器正在运行（${running.slice(0, 3).join(", ")}），但未带调试端口。\n请先完全退出浏览器（含后台进程），再用带调试端口的命令重新启动，例如：\n${process.platform === "win32" ? "msedge --remote-debugging-port=9222 https://opencode.ai" : "microsoft-edge --remote-debugging-port=9222 https://opencode.ai"}\n然后重新运行本命令。`
-								: process.platform === "win32"
-									? "❌ 未找到带调试端口的浏览器。\n请先启动托管 Chrome 并登录 opencode.ai（或让 pi 打开浏览器），再运行本命令。"
-									: "❌ 未找到带调试端口的浏览器。\n请先启动带调试端口的浏览器并登录 opencode.ai，例如：\nchromium --remote-debugging-port=9222 https://opencode.ai\n（或 google-chrome / microsoft-edge）然后重新运行本命令。",
-							"error",
-						);
+					if (ports.length > 0) {
+						let exported = "";
+						let usedPort = 0;
+						for (const { port } of ports) {
+							try {
+								const c = await exportCookiesViaCdp(port);
+								// 未登录时也可能有访客 cookie，必须含 auth 才算有效
+								if (c && /(^|;\s*)auth=/.test(c)) { exported = c; usedPort = port; break; }
+							} catch { /* try next */ }
+						}
+						if (!exported) {
+							ctx.ui.notify("❌ 找到了浏览器但未导出 cookie：请先在浏览器中打开 opencode.ai 并登录。", "error");
+							return;
+						}
+						writeFileSync(cfg.cookiePath, exported, "utf-8");
+						await refresh();
+						ctx.ui.notify(`✅ 登录态已保存（来自端口 ${usedPort}），额度已刷新`, "success");
 						return;
 					}
-					let exported = "";
-					let usedPort = 0;
-					for (const { port } of ports) {
-						try {
-							exported = await exportCookiesViaCdp(port);
-							if (exported) { usedPort = port; break; }
-						} catch { /* try next */ }
-					}
+
+					// 方式 2:独立窗口登录（不影响正在使用的浏览器）
+					ctx.ui.notify("🪟 正在打开独立登录窗口（不影响你的浏览器），请在弹出的窗口登录 opencode.ai（可能需 GitHub 授权）...", "info");
+					const exported = await loginViaDedicatedWindow();
 					if (!exported) {
-						ctx.ui.notify("❌ 找到了浏览器但未导出 cookie：请先在浏览器中打开 opencode.ai 并登录。", "error");
+						ctx.ui.notify(
+							"❌ 独立登录窗口超时或失败。\n可手动兜底：在浏览器 F12 → Application → Cookies 复制 opencode.ai 的 cookie，然后运行 /opencode-quota cookie \"<cookies>\"",
+						"error",
+					);
 						return;
 					}
 					writeFileSync(cfg.cookiePath, exported, "utf-8");
 					await refresh();
-					ctx.ui.notify(`✅ 登录态已保存（来自端口 ${usedPort}），额度已刷新`, "success");
+					ctx.ui.notify("✅ 登录态已保存（独立窗口方式），额度已刷新", "success");
 					return;
 				}
 
