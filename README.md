@@ -14,7 +14,6 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 
 | 扩展 | 功能 | 是否自动 | 命令 |
 |------|------|:--------:|------|
-| `question.ts` | 交互提问（AI 弹选项让你选，借鉴 bd-dxg/my-pi） |
 | `questionnaire.ts` | 单题/多题问卷（tab 切换 + 汇总） |
 | `notify.ts` | AI 忙完发系统通知 | 自动 | 无 |
 | `permission-gate.ts` | Codex 风格权限审批（4 种模式） | 自动 | `/permission` |
@@ -24,6 +23,10 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 > **loop.ts 已归档**（v0.3.1）：循环模式改用社区包 `npm:@narumitw/pi-goal`（功能更完善：token 预算、无进展自动暂停、`goal_complete` 结构化完成判定）。安装：`pi install npm:@narumitw/pi-goal`，命令 `/goal`。
 >
 > 旧版 loop 源码保留在 `extensions-archive/`（**不加载、不维护**），万一以后需要：`pi -e ./extensions-archive/loop.ts` 即可临时使用。
+
+> **question.ts 已归档**（v0.3.2）：交互提问改用社区包 `npm:@juicesharp/rpiv-ask-user-question`（支持单题/多题问卷、typed options）。安装：`pi install npm:@juicesharp/rpiv-ask-user-question`，工具名 `ask_user_question`。
+>
+> 旧版源码保留在 `extensions-archive/question.ts`（**不加载、不维护**）。
 
 ### 🖥️ computer-use（fork 版）
 
@@ -152,12 +155,24 @@ git add . && git commit -m "update" && git push
 ## 💻 新机器完整安装清单（2-pi-r 同步）
 
 ```bash
-# 1. 安装包
+# 1. 安装包（当前主机的完整清单）
 pi install git:github.com/SaltedFish0318/2-pi-r
 pi install npm:pi-mcp-adapter
 pi install npm:pi-observational-memory
 pi install npm:@ff-labs/pi-fff
 pi install npm:@narumitw/pi-goal
+pi install npm:@juicesharp/rpiv-ask-user-question
+pi install npm:@juicesharp/rpiv-todo
+pi install npm:@narumitw/pi-btw
+pi install npm:pi-workspace-history
+pi install npm:@tmustier/pi-raw-paste
+pi install npm:pi-tool-display
+pi install npm:@mrclrchtr/supi-context
+pi install npm:pi-extmgr
+pi install npm:@juanibiapina/pi-extension-settings
+pi install npm:@tintinweb/pi-subagents
+pi install npm:@demigodmode/pi-web-agent
+pi install npm:pi-spark
 
 # 2. 仓库内测试依赖（可选，跑单测用）
 cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
@@ -167,8 +182,9 @@ cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
 
 | 项 | 位置 | 说明 |
 |----|------|------|
+| 模型配置 + API Key | `~/.pi/agent/models.json` | **⚠️ 含密钥，绝不进仓库**。每台机器手动创建/复制 |
 | API Key | `~/.pi/agent/auth.json` | 各自登录 opencode-go |
-| MCP 服务器 | `~/.config/mcp/mcp.json` | wsl-mcp + context7 |
+| MCP 服务器 | `~/.config/mcp/mcp.json` | context7 等 |
 | 权限模式 | `~/.pi/agent/permissions.json` | `/permission` 设置 |
 | 记忆配置 | `~/.pi/agent/settings.json` | `observational-memory` 键（ratio 模式） |
 | 配额 cookie | `~/.pi/agent/opencode-cookies.txt` | `/opencode-quota login` 导出 |
@@ -184,6 +200,7 @@ cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
 
 ## 📝 变更记录
 
+- **0.3.2** question.ts 归档至 `extensions-archive/`（改用 `rpiv-ask-user-question`）；安装清单同步当前主机全部包；明确 models.json（含 API Key）不随仓库同步
 - **0.3.1** loop 源码归档至 `extensions-archive/`（不加载、不维护，`pi -e` 可临时启用）
 - **0.3.0** 移除 loop.ts（改用社区包 `@narumitw/pi-goal`）；README 同步更新
 - **0.2.1** 当前版本

@@ -1,3 +1,10 @@
 node_modules/
 pi-computer-use/native/*/bridge-rs/target/
 pi-computer-use/prebuilt/
+
+# 敏感文件防护（防止误提交个人配置/密钥）
+models.json
+auth.json
+*.cookies.txt
+permissions.json
+settings.json
