@@ -355,7 +355,9 @@ export default function (pi: ExtensionAPI) {
 					const ports = await findCdpPorts();
 					if (ports.length === 0) {
 						ctx.ui.notify(
-							"❌ 未找到带调试端口的浏览器。\n请先启动托管 Chrome 并登录 opencode.ai（或让 pi 打开浏览器），再运行本命令。",
+							process.platform === "win32"
+								? "❌ 未找到带调试端口的浏览器。\n请先启动托管 Chrome 并登录 opencode.ai（或让 pi 打开浏览器），再运行本命令。"
+								: "❌ 未找到带调试端口的浏览器。\n请先启动带调试端口的浏览器并登录 opencode.ai，例如：\nchromium --remote-debugging-port=9222 https://opencode.ai\n（或 google-chrome）然后重新运行本命令。",
 							"error",
 						);
 						return;
