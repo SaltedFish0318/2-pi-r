@@ -21,7 +21,9 @@ pi install git:github.com/SaltedFish0318/2-pi-r
 | `secret-guard.ts` | 密钥保护（拦截 + 屏蔽敏感信息） | 自动 | `/secret`（诊断用） |
 | `pi-computer-use/` | 电脑控制（桌面 + 浏览器自动化，fork 自 [injaneity/pi-computer-use](https://github.com/injaneity/pi-computer-use)，MIT） | 自动 | `/computer-use` |
 
-> **loop.ts 已移除**（v0.3.0）：循环模式改用社区包 `npm:@narumitw/pi-goal`（功能更完善：token 预算、无进展自动暂停、`goal_complete` 结构化完成判定）。安装：`pi install npm:@narumitw/pi-goal`，命令 `/goal`。
+> **loop.ts 已归档**（v0.3.1）：循环模式改用社区包 `npm:@narumitw/pi-goal`（功能更完善：token 预算、无进展自动暂停、`goal_complete` 结构化完成判定）。安装：`pi install npm:@narumitw/pi-goal`，命令 `/goal`。
+>
+> 旧版 loop 源码保留在 `extensions-archive/`（**不加载、不维护**），万一以后需要：`pi -e ./extensions-archive/loop.ts` 即可临时使用。
 
 ### 🖥️ computer-use（fork 版）
 
@@ -181,6 +183,7 @@ cd ~/.pi/agent/git/github.com/SaltedFish0318/2-pi-r && npm install && npm test
 
 ## 📝 变更记录
 
+- **0.3.1** loop 源码归档至 `extensions-archive/`（不加载、不维护，`pi -e` 可临时启用）
 - **0.3.0** 移除 loop.ts（改用社区包 `@narumitw/pi-goal`）；README 同步更新
 - **0.2.1** 当前版本
 - **0.1.0** 初始版本：loop / notify / permission-gate / secret-guard

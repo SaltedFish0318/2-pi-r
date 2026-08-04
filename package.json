@@ -1,6 +1,6 @@
 {
   "name": "pi-tools",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi 自定义扩展集合：notify / permission-gate / secret-guard / computer-use / question / questionnaire",
   "keywords": [
     "pi-package",
